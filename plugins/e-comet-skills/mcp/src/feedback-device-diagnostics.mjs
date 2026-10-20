@@ -70,10 +70,12 @@ const specs = {
         if (Object.values(core).some(item => item === undefined)) return undefined;
         return compact({ ...core, mcpProtocolVersion: text(value.mcpProtocolVersion) });
     } },
-    // The host that runs the plugin is the first triage fact: Cowork, Claude Code and Codex differ in hooks,
-    // transports and budgets. The values are the bounded strings the client sent in MCP initialize.
+    // The host that runs the plugin is the first triage fact: Cowork, Claude Code, Codex and DeepSeek differ in
+    // hooks, transports and budgets. The values are the bounded strings the client sent in MCP initialize, plus
+    // the Harness runtime version the native DeepSeek adapter passes through the local module's environment.
     client: { check: 'client', sources: ['mcp_initialize'], planes: ['client'], causes: ['unknown'], facts: value =>
-        record(value) && value.provenance === 'client_reported' ? compact({ name: text(value.name), version: text(value.version), provenance: 'client_reported' }) : undefined },
+        record(value) && value.provenance === 'client_reported' ? compact({ name: text(value.name), version: text(value.version), provenance: 'client_reported',
+            hostRuntimeVersion: text(value.hostRuntimeVersion) }) : undefined },
     listener: { check: 'listener', sources: ['bridge_runtime'], planes: ['device'], causes: ['address_in_use', 'listen_failed', 'unknown'], facts: value => {
         if (!record(value) || value.operation !== 'bind_listener' || !['pending', 'listening', 'address_in_use', 'failed'].includes(value.listenerState)) return undefined;
         return compact({ operation: 'bind_listener', listenerState: value.listenerState,
@@ -234,7 +236,8 @@ export const feedbackDeviceDiagnosticsSchema = diagnosticObject({
     snapshot: checkSchema('snapshot', ['local_bridge_status'], ['device'], undefined, ['unknown']),
     runtime: checkSchema('runtime', ['node_process'], ['device'], diagnosticObject({ nodeVersion: diagnosticString, platform: diagnosticString,
         arch: diagnosticString, bridgeVersion: diagnosticString, mcpProtocolVersion: diagnosticString }, ['nodeVersion', 'platform', 'arch', 'bridgeVersion']), ['unknown']),
-    client: checkSchema('client', ['mcp_initialize'], ['client'], diagnosticObject({ name: diagnosticString, version: diagnosticString, provenance: { const: 'client_reported' } }, ['provenance']), ['unknown']),
+    client: checkSchema('client', ['mcp_initialize'], ['client'], diagnosticObject({ name: diagnosticString, version: diagnosticString, provenance: { const: 'client_reported' },
+        hostRuntimeVersion: diagnosticString }, ['provenance']), ['unknown']),
     listener: checkSchema('listener', ['bridge_runtime'], ['device'], diagnosticObject({ operation: { const: 'bind_listener' },
         listenerState: { type: 'string', enum: ['pending', 'listening', 'address_in_use', 'failed'] },
         systemCode: { type: 'string', enum: ['EACCES', 'EPERM', 'EADDRINUSE', 'EADDRNOTAVAIL', 'EAFNOSUPPORT', 'EINVAL'] } }, ['operation', 'listenerState']), ['address_in_use', 'listen_failed', 'unknown']),

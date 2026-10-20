@@ -245,8 +245,8 @@ export const isValidOzonSearchPositionsResult = (payload, skus) => {
     if (payload.ok === true) {
         if (
             !hasOnlyKeys(payload, ['itemIndex', 'ok', 'status', 'checkedAt', 'positions']) || Object.keys(payload).length !== 5 ||
-            // 8.64e15 ms is the largest valid Date, so toISOString() never throws on an accepted value.
-            !Number.isSafeInteger(payload.checkedAt) || payload.checkedAt <= 0 || payload.checkedAt > 8.64e15 || !Array.isArray(payload.positions)
+            // The last millisecond of year 9999: toISOString() keeps the four-digit year the output schema requires.
+            !Number.isSafeInteger(payload.checkedAt) || payload.checkedAt <= 0 || payload.checkedAt > 253402300799999 || !Array.isArray(payload.positions)
         ) return false;
         if (payload.status === 'empty') return payload.positions.length === 0;
         if (payload.status !== 'complete' || !payload.positions.every(isValidOzonSearchPositionsCell)) return false;

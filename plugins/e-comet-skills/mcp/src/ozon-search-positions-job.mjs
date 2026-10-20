@@ -14,6 +14,7 @@ const POSITIONS_STOP_REASONS = Object.freeze({
 export const OZON_SEARCH_POSITIONS_STOP_REASONS = Object.freeze([...OZON_PACKAGE_STOP_REASONS, 'region_unavailable', 'sku_limit_exceeded']);
 const stopReason = (code) => Object.hasOwn(POSITIONS_STOP_REASONS, code) ? POSITIONS_STOP_REASONS[code] : ozonPackageStopReason(code);
 // The extension stops after three of these in a row and skips the rest as cancelled; the breaker is named here.
+// Mirrors the extension's classification: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
 const SYSTEMIC_CODES = new Set(['PREFLIGHT_FAILED', 'POLL_FAILED', 'POLL_EXHAUSTED', 'OPERATION_DEADLINE_EXCEEDED']);
 
 const interrupted = (message) => ({ code: 'OZON_EXECUTION_INTERRUPTED', stage: 'execution', retryable: false, message });

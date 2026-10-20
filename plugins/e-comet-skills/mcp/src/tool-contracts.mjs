@@ -1,4 +1,6 @@
 import { OZON_PROMOTION_MIN_EXTENSION_VERSION } from './extension-vocabulary.mjs';
+import { MAX_OZON_REPORT_PACKAGE_ITEMS } from './ozon-report-package-domain.mjs';
+import { maxSearchPositionsQueries } from './ozon-search-positions-domain.mjs';
 
 const authorizationWorkflow =
     'This typed local tool owns the workflow: select it based on user intent, then call the remote e-Comet browser_job exactly once with the matching typed job and immediately invoke this tool. ' +
@@ -187,14 +189,19 @@ const analyticsPackageContract =
             'Promotion analytics remains a separate Ozon workflow. The operation may create saved reports in Ozon, but it does not change products, campaigns, budgets, or seller settings. ' +
             'Returns compact metadata and one private resource_link per completed workbook. The resource_link contains a local file URI; workbook bytes, base64, company context, report identifiers, and request details are not included in model content.';
 
-const searchPositionsContract =
+// Cowork's one-minute call deadline caps a job's queries there; every other host gets the package cap.
+const searchPositionsQueryLimit = (maxQueries) => (maxQueries < MAX_OZON_REPORT_PACKAGE_ITEMS
+    ? `More than 10 SKUs need several jobs, only on the user's decision. This app ends a tool call after about a minute, so one job checks at most ${maxQueries} queries: run a longer list as consecutive jobs of up to ${maxQueries} queries, each with its own browser_job. `
+    : `More than ${maxQueries} queries or 10 SKUs need several jobs, only on the user's decision. `);
+
+const searchPositionsContract = (maxQueries) =>
             'Get Ozon search places of given Ozon SKUs (own or competitors\') for given search queries as one JSON table: rows are queries, columns are the SKUs. Use for Russian requests about позиции/места товаров в поиске Ozon по фразам. ' +
             ozonScopeGuard +
-            'Call the remote browser_job exactly once with job {type:"ozon_search_positions",queries:[1-50 strings],skus:[1-10 integers],region?:string default "Москва",platform?:"ozon"|"select"}, then invoke this local tool exactly once with the identical queries, skus, region and platform. ' +
+            `Call the remote browser_job exactly once with job {type:"ozon_search_positions",queries:[1-${maxQueries} strings],skus:[1-10 integers],region?:string default "Москва",platform?:"ozon"|"select"}, then invoke this local tool exactly once with the identical queries, skus, region and platform. ` +
             ozonHookInjection +
             'Never automatically retry browser_job or this local call, including rate-limited work; a fresh authorization requires an explicit user-directed retry. ' +
-            'Each checked query is also saved in the seller\'s Ozon query history, as when the seller checks it in the Ozon Seller cabinet; nothing else in the account changes. ' +
-            'Queries are trimmed, 1-128 characters and unique after trimming; their order is execution priority. SKUs are unique positive integers. More than 50 queries or 10 SKUs need several jobs, only on the user\'s decision. ' +
+            'Queries are trimmed, 1-128 characters and unique after trimming; their order is execution priority. SKUs are unique positive integers. ' +
+            searchPositionsQueryLimit(maxQueries) +
             'region is a city or area name as Ozon lists it; a word such as «беларусь» inside a query is part of the query, never a region. ' +
             'platform "ozon" is the main Ozon storefront; "select" is Ozon Селект (brand storefront), where empty usually means the goods are not sold in Селект. ' +
             'Read queries[] by itemIndex; each positions[] follows the top-level skus order. A cell is an integer place; "not_found" means Ozon reports no such product for this query, which may also mean a wrong SKU; ' +
@@ -208,7 +215,7 @@ const searchPositionsContract =
             'OZON_REGION_UNAVAILABLE: the region matched no Ozon location or several; show details.candidates and ask the user for a precise city, then a new job on the user\'s decision. ' +
             'OZON_SKU_LIMIT_EXCEEDED: more SKUs than Ozon allows for this seller (details.limit); split them into several jobs only on the user\'s decision. ' +
             'OZON_SEARCH_FAILED: Ozon failed this query; report the query as failed, no automatic retry. ' +
-            'OZON_RATE_LIMITED: Ozon limited the requests; the package stopped and the remaining queries are skipped; no automatic retry. ' +
+            'OZON_RATE_LIMITED: Ozon limited the requests; the package stopped and the remaining queries are skipped; no automatic retry. Ozon counts per minute, so a new job for the skipped queries waits at least a minute, on the user\'s decision. ' +
             'OZON_SEARCH_POSITIONS_CAPABILITY_UNAVAILABLE: the connected extension cannot run this tool; the user updates the e-Comet extension, then a new authorization on the user\'s decision; opening an Ozon page does not help. ' +
             'OZON_ROUTE_NOT_READY: no ready Ozon Seller route was reachable and its cause is not established; ask the user to check the extension in the same browser profile and refresh any authenticated Ozon Seller page under https://seller.ozon.ru/app, then a new authorization on the user\'s decision. Never use WB-tab recovery for Ozon. ' +
             'OZON_CONTEXT_CHANGED: the Seller company changed during the run, so the remaining queries are skipped; a new job on the user\'s decision pins the then-current company. ' +
@@ -293,7 +300,7 @@ const signedContracts = Object.freeze({
     ozon_seller_promotion_report: promotionContract,
     ozon_seller_promotion_reports: promotionPackageContract,
     ozon_seller_analytics_report: analyticsPackageContract,
-    ozon_search_positions: searchPositionsContract,
+    ozon_search_positions: searchPositionsContract(MAX_OZON_REPORT_PACKAGE_ITEMS),
 });
 
 const feedbackContractAppliesTo = Object.freeze([
@@ -312,14 +319,18 @@ const feedbackResult = (name) => {
     };
 };
 
-export const describeToolContract = (name) => {
+/** @param {string} name @param {{ clientName?: string }} [options] */
+export const describeToolContract = (name, { clientName } = {}) => {
     if (FEEDBACK_CONTRACT_TOOL_NAMES.includes(name)) return feedbackResult(name);
     if (!Object.hasOwn(signedContracts, name)) return null;
+    const contract = name === 'ozon_search_positions'
+        ? searchPositionsContract(maxSearchPositionsQueries(clientName))
+        : signedContracts[name];
     return {
         schemaVersion: FEEDBACK_CONTRACT_SCHEMA_VERSION,
         type: 'e_comet_tool_contract',
         requestedTool: name,
         appliesTo: ['browser_job', name],
-        contract: signedContracts[name],
+        contract,
     };
 };

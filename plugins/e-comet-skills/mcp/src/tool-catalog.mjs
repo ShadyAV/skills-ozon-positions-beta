@@ -1,5 +1,7 @@
 import { toolInputSchemas, toolOutputSchemas, validateSchemaValue } from './tool-schemas.mjs';
 import { FEEDBACK_CONTRACT_TOOL_NAMES, SIGNED_CONTRACT_TOOL_NAMES } from './tool-contracts.mjs';
+import { MAX_OZON_REPORT_PACKAGE_ITEMS } from './ozon-report-package-domain.mjs';
+import { maxSearchPositionsQueries } from './ozon-search-positions-domain.mjs';
 
 const liveToolAnnotations = {
     readOnlyHint: true,
@@ -80,7 +82,7 @@ export const tools = [
     {
         name: 'e_comet_diagnose',
         description:
-            'Collect scoped technical evidence for installation, current runtime, or the exact last operation handle. Diagnosis never pre-approves or repeats a business tool. A passed check applies only to its named observation plane and time. Never repeat an indeterminate create or upload. Safe probes run only when explicitly requested and do not obtain authorization or call a marketplace. The installation extension_install probe reads Chromium profile metadata to report where the e-Comet extension is installed and enabled; it never proves the extension is connected. The installation hook_permissions and codex_mcp_auth probes read native Codex configuration state (hook trust; remote-server sign-in status); they do not prove that a hook ran or that the current task is authorized, and are unavailable for Cowork. For exact input, output, field, and enum semantics, load the packaged mcp/DIAGNOSTICS.md reference.',
+            'Collect scoped technical evidence for installation, current runtime, or the exact last operation handle. Diagnosis never pre-approves or repeats a business tool. A passed check applies only to its named observation plane and time. Never repeat an indeterminate create or upload. Safe probes run only when explicitly requested and do not obtain authorization or call a marketplace. The installation extension_install probe reads Chromium profile metadata to report where the e-Comet extension is installed and enabled; it never proves the extension is connected. The installation hook_permissions and codex_mcp_auth probes read native Codex configuration state (hook trust; remote-server sign-in status); they do not prove that a hook ran or that the current task is authorized, and answer unsupported under any client other than Codex (Cowork, DeepSeek). For exact input, output, field, and enum semantics, load the packaged mcp/DIAGNOSTICS.md reference.',
         inputSchema: toolInputSchemas.e_comet_diagnose,
         outputSchema: toolOutputSchemas.e_comet_diagnose,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -226,7 +228,6 @@ export const tools = [
         description:
             'Ozon search places of given SKUs for given queries, as one JSON table of queries by SKUs. Use for Russian requests about позиции/места товаров в поиске Ozon по фразам. ' +
             signedDiscovery('ozon_search_positions', 'ozon_search_positions') +
-            'Each checked query is also saved in the seller\'s Ozon query history. ' +
             'Never automatically retry browser_job or the local call, including rate-limited work; a fresh job may include only user-selected skipped or failed queries. ' +
             'status "empty" means Ozon has no data for that query, not that the SKUs were not found. ' +
             completeContractGuidance,
@@ -235,6 +236,20 @@ export const tools = [
         annotations: reportToolAnnotations,
     },
 ];
+
+// Cowork gets the same search positions tool with its five-query job cap in the schema and the description.
+export const toolsForClient = (clientName) => {
+    const maxQueries = maxSearchPositionsQueries(clientName);
+    if (maxQueries >= MAX_OZON_REPORT_PACKAGE_ITEMS) return tools;
+    return tools.map((tool) => tool.name !== 'ozon_search_positions' ? tool : {
+        ...tool,
+        description: `${tool.description}In this app one job checks at most ${maxQueries} queries; run a longer list as consecutive jobs. `,
+        inputSchema: {
+            ...tool.inputSchema,
+            properties: { ...tool.inputSchema.properties, queries: { ...tool.inputSchema.properties.queries, maxItems: maxQueries } },
+        },
+    });
+};
 
 export const validateToolArguments = (name, args) => {
     const tool = tools.find((candidate) => candidate.name === name);

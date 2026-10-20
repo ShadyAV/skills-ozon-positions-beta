@@ -79,8 +79,8 @@ Local tools:
 - `ozon_seller_analytics_report` — exports 1–50 ordered general-analytics XLSX files through one `browser_job`
   authorization and one local call; the connected extension must advertise the analytics capability;
 - `ozon_search_positions` — returns the Ozon search places of 1–10 SKUs for 1–50 ordered queries as one inline JSON
-  table through one `browser_job` authorization and one local call; each checked query enters the seller's Ozon query
-  history, and the connected extension must advertise the search positions capability;
+  table through one `browser_job` authorization and one local call; the connected extension must advertise the search
+  positions capability;
 - `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
   peer when it cannot;
 - `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.

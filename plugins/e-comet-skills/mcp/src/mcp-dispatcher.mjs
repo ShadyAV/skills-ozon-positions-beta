@@ -38,11 +38,11 @@ import { executeOzonAnalyticsJob, safeOzonAnalyticsToolError } from './ozon-anal
 import { getOzonReportPackageArtifactResources } from './ozon-report-package-job.mjs';
 import { rejectedOzonPackage } from './ozon-report-package-result.mjs';
 import { parsePromotionPeriods } from './ozon-report-package-domain.mjs';
-import { canonicalSearchPositionsRequest } from './ozon-search-positions-domain.mjs';
+import { canonicalSearchPositionsRequest, maxSearchPositionsQueries } from './ozon-search-positions-domain.mjs';
 import { executeOzonSearchPositionsJob, rejectedOzonSearchPositions } from './ozon-search-positions-job.mjs';
 import { parseAnalyticsDateRange } from './ozon-analytics-domain.mjs';
 import { parseOzonPromotionPeriod } from './ozon-promotion-domain.mjs';
-import { serverInstructions, tools, validateToolArguments } from './tool-catalog.mjs';
+import { serverInstructions, toolsForClient, validateToolArguments } from './tool-catalog.mjs';
 import {
     ozonExtensionOutdatedError,
     browserJobRejectionDetails,
@@ -112,7 +112,7 @@ const OZON_PACKAGE_FAMILIES = Object.freeze({
     analytics: { name: 'Ozon analytics report package', minVersion: OZON_PACKAGE_MIN_EXTENSION_VERSION,
         supportField: 'ozonSellerAnalyticsReportSupported', capability: OZON_ANALYTICS_CAPABILITY, code: 'OZON_ANALYTICS_CAPABILITY_UNAVAILABLE', stage: 'context' },
     // The first extension release announcing this capability is not served yet: its version is set here at release.
-    positions: { name: 'Ozon search positions operation', minVersion: undefined,
+    positions: { name: 'Ozon search positions operation', minVersion: '1.5.13',
         supportField: 'ozonSearchPositionsSupported', capability: OZON_SEARCH_POSITIONS_CAPABILITY, code: 'OZON_SEARCH_POSITIONS_CAPABILITY_UNAVAILABLE', stage: 'context' },
 });
 // Only this dispatcher can attest a missing capability from bridge status.
@@ -1044,7 +1044,7 @@ export const createMcpMessageHandler = ({
         try {
             if (!validateToolArguments(toolName, args)) throw new TypeError('The Ozon search positions arguments are invalid.');
             const { queries, skus, region, platform } = args;
-            request = canonicalSearchPositionsRequest({ queries, skus, region, platform });
+            request = canonicalSearchPositionsRequest({ queries, skus, region, platform }, maxSearchPositionsQueries(clientInfo?.name));
         } catch (error) {
             // Domain messages name the broken rule, never the rejected values.
             result = { ok: false, status: 'failed', jobType: toolName,
@@ -1088,7 +1088,7 @@ export const createMcpMessageHandler = ({
                     return;
                 }
                 const diagnosis = await collectDiagnosis({ ...args, operationDiagnostics, getBridgeStatus: currentBridgeStatus,
-                    requestExtensionDiagnosticSnapshot, storageLayout, now,
+                    requestExtensionDiagnosticSnapshot, storageLayout, now, clientName: clientInfo?.name,
                     randomUUID: createUuid, ...(collectInstallation ? { collectInstallation } : {}),
                     ...(probeExtensionInstall ? { probeExtensionInstall } : {}),
                     ...(collectHookPermissions ? { collectHookPermissions } : {}) });
@@ -1107,7 +1107,7 @@ export const createMcpMessageHandler = ({
                     )), true));
                     return;
                 }
-                sendResult(id, textResult(describeToolContract(args.name)));
+                sendResult(id, textResult(describeToolContract(args.name, { clientName: clientInfo?.name })));
             } },
         ],
         [
@@ -1172,7 +1172,7 @@ export const createMcpMessageHandler = ({
             return;
         }
         if (method === 'tools/list') {
-            sendResult(id, { tools });
+            sendResult(id, { tools: toolsForClient(clientInfo?.name) });
             return;
         }
         if (method !== 'tools/call') {

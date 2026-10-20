@@ -1,0 +1,154 @@
+# e-Comet local MCP
+
+Codex and Claude launch `src/server.mjs` directly over STDIO with the `node` command. The server has no npm runtime
+dependencies; all required source modules are included in this directory. Node.js 22+ is required.
+
+From the installed plugin root, run `node mcp/src/doctor.mjs --json` to inspect bootstrap metadata and storage
+configuration without starting the MCP server. The command always prints one JSON document when collection completes;
+failed checks still exit with status 0. It does not bind the bridge port, create pairing state, remove retained files, or
+contact the extension, e-Comet, or a marketplace. The output identifies only the Node process that ran the doctor. A
+successful result does not prove that the desktop host installed or enabled this plugin, launches this copy, or runs its
+trusted hooks.
+
+The `secondary` bridge role is a normal proxy role. `peer.bridgeVersion` and `extension.version`
+identify different components; version skew alone does not establish a failure cause.
+`extensionConnected:false` means there is no effective extension route, not why it is absent.
+The released singular Ozon promotion report requires e-Comet extension 1.5.6+ and any authenticated Ozon Seller `/app` page,
+not a Wildberries tab or a specific promotion-overview page. Ozon company context comes only from the
+`sc_company_id` cookie; the extension does not depend on Vue, Vuex, Axios defaults, or a visible company label.
+Feedback is independent of bridge
+and extension readiness; its optional history is bounded current-session history supplied by
+the trusted host hook. The explicit history choice and protected handoff remain required.
+
+Feedback failures provide only closed diagnostic evidence in `error.details`: the operation, reason,
+system code, HTTP status, and optional public module/line context. No raw paths, messages, stacks,
+upload secrets, or history are exposed there. A source location helps investigation; it does not prove
+the root cause. Explain the supplied safe evidence and next action without guessing missing causes.
+`UPLOAD_UNCERTAIN` and `FEEDBACK_SUBMISSION_FAILED` mean delivery cannot be confirmed; ask for user
+direction and never automatically repeat submission or restart the flow. On success, say only that
+the report was sent to e-Comet. The archive has a 32 MiB aggregate limit; the chosen history option
+is never silently changed and truncation markers are not inserted.
+
+`local_bridge_status` distinguishes bridge startup, extension waiting, Wildberries-tab readiness,
+update needs, and pairing failures. It reports facts, not a global next action: recovery depends on
+the user's task and the selected typed tool's result. It also reports the
+connected extension's version and family-specific Ozon capability verdicts; these observations
+are informational and never replace the typed tool's own capability gate. Peer-token storage affects pairing only;
+`peerRejection.code` identifies the observed pairing failure. Storage-dependent calls return the typed
+`LOCAL_STORAGE_UNAVAILABLE` outcome when no valid host plugin-data root or explicit store override exists.
+The peer token and the feedback hook secret remain in shared profile state, outside host-specific
+plugin-data output, so concurrently running supported hosts can coordinate the same local lifecycle.
+
+The canonical source and tests live under `e-comet-local-mcp/` in the private skills repository. This plugin contains a
+release snapshot of its `src/` directory.
+
+The MCP listens only on `127.0.0.1:17361`, and the extension connects automatically while local access is enabled.
+There is no pairing flow in the MVP. Full WB responses and artifacts are stored below the host plugin-data root; MCP
+tool results contain only compact summaries and local paths.
+The extension WebSocket accepts only the official e-Comet Chrome Web Store origin by default.
+
+Each result file is UTF-8 NDJSON with one fetched unit per line:
+
+- product card: `{ jobId, nmId, key, url, response }`;
+- search: `{ jobId, queryIndex, query, page, url, response }`;
+- check-by-query card: `{ jobId, kind: "card", product_id, url, response }`;
+- check-by-query search: `{ jobId, kind: "search", query, page, url, response }`;
+- recommendations: `{ jobId, nmId, page, url, response }`.
+
+The original WB payload is at `response.data.body`. Product-card responses may additionally contain
+`response.warehouseNames`, a best-effort map of warehouse ID to the locally known display name.
+
+Full responses and artifacts use `PLUGIN_DATA` or `CLAUDE_PLUGIN_DATA` when supplied by the host. If both are absent,
+the local MCP uses the per-user e-Comet application-data directory. Both use owned `local-mcp-output-v2` children;
+bridge status identifies the selected backend. Invalid declared paths fail explicitly. Absolute `ECOMET_LOCAL_AGENT_RESULT_DIR`, `ECOMET_LOCAL_AGENT_ARTIFACT_DIR`, and
+`ECOMET_FEEDBACK_ARTIFACT_DIR` values override only their corresponding store. POSIX directories are created or
+repaired to mode `0700` and files to `0600`; Windows relies on ACL inheritance from the selected current-user directory.
+
+Local tools:
+
+- `wb_product_card` — discovers and executes signed live product-card requests;
+- `wb_search_by_query` — discovers and executes signed live WB search requests;
+- `wb_check_by_query` — checks whether one article appears in search for up to 100 phrases, without reporting a position;
+- `wb_recommendations_by_product` — discovers and executes signed recommendation-shelf requests;
+- `wb_seller_reviews` — exports original WB seller-review XLSX reports through the authenticated seller portal;
+- `prepare_e_comet_feedback` — prepares one local e-Comet issue-report archive after explicit user consent;
+- `submit_e_comet_feedback` — uploads one prepared feedback archive with a trusted one-use grant;
+- `ozon_seller_promotion_report` — exports one Ozon Seller promotion analytics XLSX report for one inclusive period;
+- `ozon_seller_promotion_reports` — exports 1–50 ordered promotion-period XLSX files through one `browser_job`
+  authorization and one local call;
+- `ozon_seller_analytics_report` — exports 1–50 ordered general-analytics XLSX files through one `browser_job`
+  authorization and one local call; the connected extension must advertise the analytics capability;
+- `ozon_search_positions` — returns the Ozon search places of 1–10 SKUs for 1–50 ordered queries as one inline JSON
+  table through one `browser_job` authorization and one local call; each checked query enters the seller's Ozon query
+  history, and the connected extension must advertise the search positions capability;
+- `local_bridge_status` — reports whether the extension is connected, and why the bridge cannot reach a primary
+  peer when it cannot;
+- `wb_product_images` — public WB image-CDN lookup; this tool does not require the extension.
+
+## Workflow contract lookup
+
+The short `tools/list` catalog routes by intent; `describe_e_comet_tool({name})` returns the full current contract for exactly these nine signed local tools:
+
+- `wb_product_card`, `wb_search_by_query`, `wb_check_by_query`, `wb_recommendations_by_product`, `wb_seller_reviews`;
+- `ozon_seller_promotion_report`, `ozon_seller_promotion_reports`, `ozon_seller_analytics_report`,
+  `ozon_search_positions`.
+
+The same lookup also supports `prepare_e_comet_feedback` and `submit_e_comet_feedback`, which share one feedback contract. Successful `tools/call` output has `schemaVersion:1`, `type:"e_comet_tool_contract"`, `requestedTool` equal to the requested name, `appliesTo:["browser_job",name]` for a signed tool (or `["prepare_e_comet_feedback","report_issue","submit_e_comet_feedback"]` for either feedback name), and a nonempty `contract` string. The JSON text content mirrors `structuredContent`. The lookup is read-only: it does not start or contact the bridge, extension, signer, or marketplace, and needs no feedback consent for a signed tool. An unsupported name or failed lookup stops that tool's workflow before authorization; do not infer authorization from a catalog description alone.
+
+Choose the matching signed tool first. If its full contract is not already available in the current task, look it up once before remote `browser_job`; reuse the known contract for another call of the same tool and look up a different selected tool separately. Follow the returned business arguments and safety limits, then await exactly one `browser_job` authorization and immediately call the matching local tool once. No discovery, status probe, prose, or other call belongs between a successful `browser_job` and that dependent local call. Preserve partial/completed results and do not automatically retry uncertain creates or rate-limited work. The [authorization handoff](#authorization-handoff) below and packaged [hook implementation](../hooks/) define the trusted transport boundary.
+
+Feedback is separate: only after explicit user agreement to report an e-Comet problem, retrieve the full feedback contract before the first feedback tool and resolve the history choice as it directs. The consented dependent sequence is local `prepare_e_comet_feedback` → remote `report_issue` → local `submit_e_comet_feedback`, awaiting each stage and inserting no discovery between successful stages. It needs no `browser_job` or extension. Do not author hook-only transport fields or retry an uncertain upload. The packaged [feedback hooks](../hooks/) implement the host-specific handoff; the full native versus Cowork cloud boundary is maintained in the private architecture document.
+
+`wb_product_images` is not a lookup target. Call it directly for public CDN image URLs; it needs no describe call, `browser_job`, or Chrome extension. A failed/rate-limited probe is not proof that a product or its photos do not exist.
+
+### Authorization handoff
+
+The agent discovers the matching typed local tool first. Its description then requires sending only the small task
+descriptor to remote `browser_job` before invoking the selected local tool.
+Claude and Codex/ChatGPT Desktop use the plugin's trusted `PostToolUse` and `PreToolUse` hooks to stage and inject the
+exact opaque JWT in a one-use claim bound to the desktop session and exact local tool. The model-authored local call
+omits both trigger-field spellings, and the hook injects the transport-only field. This is an integrity guarantee, not
+a secrecy guarantee: the remote tool result may still be visible to the model, but the model does not author or
+reproduce the transport field. Hosts that do not run or cannot verify the trusted hooks fail closed. The extension
+verifies the RS256 signature, expiry, account UUID, job type, and exact signed scope. It rejects
+browser operations without matching authorization. Marketplace response bodies remain on the user's computer and do
+not pass through e-Comet backend services.
+
+The plural promotion signer accepts exactly `periods:[{dateFrom,dateTo},...]`; the analytics signer accepts exactly
+`reports:[{dateFrom,dateTo,breakdown},...]`. Each signs one descriptor containing the complete caller-ordered array.
+Promotion, analytics and search positions are separate variants and are never mixed. Package streams and ACKs carry an item index under
+one shared Ozon report owner and correlation. The create phase is never automatically retried after dispatch ambiguity.
+Completed artifacts remain available when later items fail, and a partial response lists every complete, failed, and
+skipped item.
+
+The search positions signer accepts exactly `queries`, `skus` and optional `region` and `platform`, and signs one
+descriptor with both defaults filled in. Each query is one package item with one terminal result: there is no create,
+stream or workbook, and a query is never automatically re-checked.
+
+`wb_seller_reviews` accepts the signed mixed export descriptor, expands an omitted `isAnswered` into separate answered and
+unanswered physical reports, and preserves successful work when another export fails. It returns compact status metadata plus
+one private local `resource_link` for each successful XLSX workbook. Workbook bytes and base64 never enter tool content or model
+context; opening or summarizing a workbook is a separate explicit action. Artifacts are retained locally for 24 hours. Each
+workbook is limited to 100 MiB and each job to 500 MiB; a completed workbook is never evicted by another export and is
+removed only once its retention has elapsed.
+
+Ozon report tools likewise return the original XLSX workbooks as private `resource_link` entries rooted in the launching
+host's plugin data. The plugin does not add a workbook reader or converter; the originating agent may use its normal
+file and spreadsheet capabilities when the user asks to inspect a workbook. Files of older releases are left where
+they are; new payloads never fall back there.
+
+`ozon_seller_promotion_report` needs an extension build that announces the Ozon promotion capability. An older
+build cannot run the report at all, so the tool answers with an explicit outdated-extension diagnosis naming the
+installed version, the minimum supported one, and the update page, instead of asking for the report route to be
+opened. The same code without that diagnosis says only that no ready Ozon route was reachable; it does not
+establish why. Extension 1.5.6+ can use any authenticated Ozon Seller `/app` page, not only the promotion page.
+
+Multiple Codex tasks can use the fixed bridge port at the same time in MVP mode. The first MCP process owns the
+extension WebSocket; later bundled MCP processes connect to it over the loopback-only `/mcp-peer` channel and proxy
+their bounded WB fetches through that primary process. If the primary task closes, a remaining process retries the port
+and takes ownership.
+
+Processes also exchange a control-protocol version, bridge generation, build version, and instance ID. A newer
+generation waits for active WB requests to finish, receives an explicit takeover grant, claims the same port, and becomes
+the primary. The old primary and all other conversations reconnect as peers, while the extension reconnects
+automatically. Releases must increment `BRIDGE_GENERATION` whenever the active primary needs replacement.

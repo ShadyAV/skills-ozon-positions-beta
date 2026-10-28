@@ -1,9 +1,10 @@
 import { validateAuthorizedJobLimits } from './browser-job.mjs';
 import { isValidOzonSearchPositionsDetails } from './extension-protocol.mjs';
 import { OZON_SEARCH_POSITIONS_TERMINAL_CODE_STAGES } from './extension-vocabulary.mjs';
-import { OZON_PACKAGE_STOP_REASONS, ozonPackageDeadline, ozonPackageStopReason } from './ozon-report-package-result.mjs';
+import { ozonPackageDeadline, ozonPackageStopReason } from './ozon-report-package-result.mjs';
 import { canonicalSearchPositionsRequest, sameSearchPositionsRequest } from './ozon-search-positions-domain.mjs';
-import { browserJobRejectionDetails, ToolExecutionError } from './tool-errors.mjs';
+import { countRunProgress } from './run-registry.mjs';
+import { bridgeCodeDetails, browserJobRejectionDetails, ToolExecutionError } from './tool-errors.mjs';
 
 const JOB_TYPE = 'ozon_search_positions';
 const POSITIONS_STOP_REASONS = Object.freeze({
@@ -11,7 +12,6 @@ const POSITIONS_STOP_REASONS = Object.freeze({
     OZON_REGION_UNAVAILABLE: 'region_unavailable',
     OZON_SKU_LIMIT_EXCEEDED: 'sku_limit_exceeded',
 });
-export const OZON_SEARCH_POSITIONS_STOP_REASONS = Object.freeze([...OZON_PACKAGE_STOP_REASONS, 'region_unavailable', 'sku_limit_exceeded']);
 const stopReason = (code) => Object.hasOwn(POSITIONS_STOP_REASONS, code) ? POSITIONS_STOP_REASONS[code] : ozonPackageStopReason(code);
 // The extension stops after three of these in a row and skips the rest as cancelled; the breaker is named here.
 // Mirrors the extension's classification: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
@@ -30,7 +30,7 @@ export const safeOzonSearchPositionsError = (error) => {
         typeof error.message !== 'string' || error.message.length < 1 || error.message.length > 500) {
         return interrupted('The Ozon search positions operation stopped; its failure could not be classified.');
     }
-    const details = browserJobRejectionDetails(error) ??
+    const details = browserJobRejectionDetails(error) ?? bridgeCodeDetails(error) ??
         (isValidOzonSearchPositionsDetails(error.code, error.details) ? error.details : undefined);
     return { code: error.code, stage, retryable: false, message: error.message, ...(details ? { details } : {}) };
 };
@@ -87,7 +87,7 @@ export const executeOzonSearchPositionsJob = async ({ authorization, request, re
             { family: 'positions', items: signed.queries, deadlineAt: ozonPackageDeadline(authorization, now()) },
             {
                 // The broker has already checked each result against the signed queries and SKUs.
-                onItemResult: async (itemIndex, result) => {
+                onItemResult: countRunProgress(signed.queries.length, async (itemIndex, result) => {
                     const query = signed.queries[itemIndex];
                     if (result.ok) {
                         systemicStreak = 0;
@@ -107,7 +107,7 @@ export const executeOzonSearchPositionsJob = async ({ authorization, request, re
                     }
                     systemicStreak = SYSTEMIC_CODES.has(error.code) ? systemicStreak + 1 : 0;
                     rows[itemIndex] = { itemIndex, query, status: 'failed', error };
-                },
+                }),
             }
         );
     } catch (error) {

@@ -1,4 +1,5 @@
 import { ozonPackageStopReason, rejectedOzonPackage } from './ozon-report-package-result.mjs';
+import { countRunProgress } from './run-registry.mjs';
 
 const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const IMMEDIATE_ABORT_CODES = new Set([
@@ -191,7 +192,7 @@ export const executeOzonReportPackage = async ({
                     const artifact = await stream.writer.complete(metadata);
                     if (!stream.cancelled) stream.artifact = artifact;
                 },
-                onItemResult: async (itemIndex, remoteResult, { deferCleanup = false, commitArtifact = () => true } = {}) => {
+                onItemResult: countRunProgress(items.length, async (itemIndex, remoteResult, { deferCleanup = false, commitArtifact = () => true } = {}) => {
                     activeIndex = itemIndex;
                     if (abortPolicy.stopped) {
                         await abortStream(itemIndex);
@@ -232,7 +233,7 @@ export const executeOzonReportPackage = async ({
                             retryable: false,
                         });
                     }
-                },
+                }),
                 onCancel: () => undefined,
             }
         );

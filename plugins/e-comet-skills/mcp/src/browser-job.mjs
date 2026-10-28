@@ -1,6 +1,8 @@
 import {
     CHECK_QUERY_CONCURRENCY,
     DEFAULT_RETURNED_PRODUCTS,
+    FILTER_QUERY_CONCURRENCY,
+    MAX_FILTER_QUERIES,
     MAX_CONSECUTIVE_SELLER_EXPORT_FAILURES,
     MAX_CONSECUTIVE_SELLER_POLL_FAILURES,
     MIN_SELLER_OPERATION_AGENT_INTERVAL_MS,
@@ -33,6 +35,7 @@ import { parseAnalyticsReports } from './ozon-analytics-domain.mjs';
 import { parseOzonPromotionPeriod } from './ozon-promotion-domain.mjs';
 import { parsePromotionPeriods } from './ozon-report-package-domain.mjs';
 import { canonicalSearchPositionsRequest, sameSearchPositionsRequest } from './ozon-search-positions-domain.mjs';
+import { countRunProgress } from './run-registry.mjs';
 import { ToolExecutionError } from './tool-errors.mjs';
 import {
     isSuccessfulWbResponse,
@@ -46,6 +49,7 @@ import {
     summarizeProduct,
     validTimeout,
 } from './wb-domain.mjs';
+import { completeFilters, fullListKeys, keptFilters, mergeFilters, readFiltersResponse } from './wb-filters-domain.mjs';
 
 const CHECK_SEARCH_DEFAULT_PARAMS = Object.freeze({
     curr: 'rub',
@@ -130,7 +134,10 @@ const sellerExportIdentity = (sellerExport) =>
 // параллелизма задание резолвилось как обычный «провал» без признака retryable, и
 // агент не понимал, что достаточно повторить.
 const ABORTING_STAGES = new Set(['authorization', 'extension']);
-const WB_ITEM_ERROR_CODES = Object.freeze([...Object.values(FETCH_ERROR_CODES), 'WB_FETCH_FAILED', 'WB_RATE_LIMITED', 'WB_REQUEST_FAILED']);
+const WB_ITEM_ERROR_CODES = Object.freeze([
+    ...Object.values(FETCH_ERROR_CODES), 'WB_FETCH_FAILED', 'WB_RATE_LIMITED', 'WB_REQUEST_FAILED',
+    'WB_UNRELIABLE_RESPONSE', 'WB_FULL_LISTS_INCOMPLETE',
+]);
 const skippedBuyerErrors = new WeakSet();
 const buyerErrorFields = (error) => ({
     error: error.message,
@@ -208,6 +215,25 @@ export const validateAuthorizedJobLimits = (authorization) => {
             if (queries.length * job.maxPages > MAX_CHECK_SEARCH_REQUESTS)
                 throw new Error(`Browser check-by-query job requires at most ${MAX_CHECK_SEARCH_REQUESTS} search requests`);
             if (!descriptorCheckPagesAllowed(job, queries))
+                throw new Error('Invalid browser job assembled endpoint URL');
+            return;
+        }
+
+        if (authorization.jobType === 'filters_by_query') {
+            const queries = job.queries;
+            if (job.type !== 'wb-filters-by-query') throw new Error('Invalid filters-by-query descriptor type');
+            if (!validEndpoint(job.endpoint)) throw new Error('Invalid browser job endpoint');
+            if (!validParams(job.params) || job.params.resultset !== undefined || job.params.filters !== undefined)
+                throw new Error('Invalid browser job params');
+            if (
+                !Array.isArray(queries) ||
+                queries.length < 1 ||
+                queries.length > MAX_FILTER_QUERIES ||
+                !queries.every((query) => boundedText(query) && query.trim().length > 0) ||
+                new Set(queries).size !== queries.length
+            )
+                throw new Error(`Browser filters-by-query job requires 1-${MAX_FILTER_QUERIES} unique queries`);
+            if (!queries.every((query) => isAllowedWbUrl(buildFiltersDescriptorUrl(job, query))))
                 throw new Error('Invalid browser job assembled endpoint URL');
             return;
         }
@@ -435,6 +461,20 @@ const descriptorCheckPagesAllowed = (job, queries) =>
         return true;
     });
 
+// The extension rebuilds the same string and admits it only on exact equality; the contract's wbFiltersByQuery.urlFixtures
+// pin the parameter order and encoding (";" is written %3B).
+const buildFiltersDescriptorUrl = (job, query, filterKeys) => {
+    const url = new URL(job.endpoint);
+    Object.entries(job.params).forEach(([key, value]) => url.searchParams.set(key, value));
+    for (const [key, value] of Object.entries(CHECK_SEARCH_DEFAULT_PARAMS)) {
+        if (!url.searchParams.has(key)) url.searchParams.set(key, value);
+    }
+    url.searchParams.set('query', query);
+    url.searchParams.set('resultset', 'filters');
+    if (filterKeys) url.searchParams.set('filters', filterKeys.join(';'));
+    return url.toString();
+};
+
 const fillTemplate = (template, article) =>
     template.replace(/\{(\w+)\}/g, (_match, key) => {
         const value = Object.prototype.hasOwnProperty.call(article, key) ? article[key] : undefined;
@@ -474,7 +514,7 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
             url: buildDescriptorUrl(job.endpoint, job.params, query, index + 1),
         }))
     );
-    const fetched = await runWithConcurrency(units, SEARCH_CONCURRENCY, async (unit) => {
+    const fetched = await runWithConcurrency(units, SEARCH_CONCURRENCY, countRunProgress(units.length, async (unit) => {
         try {
             const response = await requestWbFetch(unit.url, job.timeout ?? REQUEST_TIMEOUT_MS, authorizationId);
             await writer.append({ jobId: job.jobId, ...unit, response, ...buyerResponseErrorFields(response) });
@@ -493,7 +533,7 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
             });
             return { ...unit, ok: false, ...buyerErrorFields(error) };
         }
-    });
+    }));
 
     const queries = job.queries.map(([query, pagesRequested], queryIndex) => {
         let globalOffset = 0;
@@ -613,7 +653,7 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
     }
 
     let searchRequestsMade = 0;
-    const queries = await runWithConcurrency(job.queries, CHECK_QUERY_CONCURRENCY, async (query) => {
+    const queries = await runWithConcurrency(job.queries, CHECK_QUERY_CONCURRENCY, countRunProgress(job.queries.length, async (query) => {
         let previousFingerprint;
         for (let page = 1; page <= job.maxPages; page += 1) {
             const url = buildCheckDescriptorUrl(job, query, page, brandId);
@@ -683,7 +723,7 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
             pagesChecked: job.maxPages,
             completionReason: 'page_limit',
         };
-    });
+    }));
 
     const successfulQueries = queries.filter((query) => query.completionReason !== 'request_failed').length;
     return {
@@ -701,6 +741,85 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
     };
 };
 
+const filtersItemError = (code, message) => buyerErrorFields(new ToolExecutionError(code, message, 'execution', false));
+const filtersResponseFailure = (response) => {
+    // A 200 whose body cannot be read carries statusText "OK", which names no failure.
+    const message =
+        response?.error ||
+        (response?.data?.ok ? 'Wildberries returned an unreadable filters response' : response?.data?.statusText) ||
+        'WB filters request failed';
+    return response?.data?.status === 429
+        ? { ...buyerResponseErrorFields(response), error: message }
+        : filtersItemError('WB_REQUEST_FAILED', message);
+};
+
+// Per phrase: the filters WB shows, then one request for every truncated characteristic and category list. A decoy body or a
+// list WB did not expand is reported, never passed off as data.
+const executeFiltersByQueryJob = async ({ authorizationId, job, requestWbFetch, writer }) => {
+    let requestsMade = 0;
+    const fetchFilters = async (query, filterKeys) => {
+        const kind = filterKeys ? 'full_lists' : 'filters';
+        const url = buildFiltersDescriptorUrl(job, query, filterKeys);
+        requestsMade += 1;
+        try {
+            const response = await requestWbFetch(url, job.timeout ?? REQUEST_TIMEOUT_MS, authorizationId);
+            await writer.append({ jobId: job.jobId, kind, query, url, response });
+            return { response };
+        } catch (error) {
+            rethrowAuthorizationError(error);
+            if (skippedBuyerErrors.has(error)) requestsMade -= 1;
+            await writer.append({ jobId: job.jobId, kind, query, url, ...buyerErrorFields(error) });
+            return { error };
+        }
+    };
+    const decoy = () => filtersItemError('WB_UNRELIABLE_RESPONSE', 'Wildberries returned a decoy filters response for this phrase.');
+
+    const phrases = await runWithConcurrency(job.queries, FILTER_QUERY_CONCURRENCY, countRunProgress(job.queries.length, async (query) => {
+        const first = await fetchFilters(query);
+        if (first.error) {
+            return { query, status: skippedBuyerErrors.has(first.error) ? 'rate_limited' : 'request_failed', ...buyerErrorFields(first.error) };
+        }
+        const listed = readFiltersResponse(first.response);
+        if (listed.state === 'decoy') return { query, status: 'request_failed', ...decoy() };
+        if (listed.state === 'failed') return { query, status: 'request_failed', ...filtersResponseFailure(first.response) };
+        if (listed.filters.length === 0) return { query, status: 'empty', filterKeys: [], filters: [] };
+
+        const kept = keptFilters(listed.filters);
+        const keys = fullListKeys(kept);
+        let fullFilters;
+        let fullFailure;
+        if (keys.length > 0 && isAllowedWbUrl(buildFiltersDescriptorUrl(job, query, keys))) {
+            const second = await fetchFilters(query, keys);
+            const full = second.error ? undefined : readFiltersResponse(second.response);
+            if (second.error) fullFailure = buyerErrorFields(second.error);
+            else if (full.state === 'genuine') fullFilters = full.filters;
+            else fullFailure = full.state === 'decoy' ? decoy() : filtersResponseFailure(second.response);
+        }
+        const { filters, missing } = completeFilters(kept, fullFilters);
+        const filterKeys = filters.map((filter) => filter.key);
+        if (missing === 0) return { query, status: 'ok', filterKeys, filters };
+        return {
+            query,
+            status: 'partial',
+            filterKeys,
+            ...(fullFailure ?? filtersItemError('WB_FULL_LISTS_INCOMPLETE', 'Wildberries did not return every full value list for this phrase.')),
+            filters,
+        };
+    }));
+
+    // A partial phrase has data, so the job is ok, but only fully answered phrases make it done.
+    const answered = phrases.filter(({ status }) => status === 'ok' || status === 'partial' || status === 'empty').length;
+    const complete = phrases.every(({ status }) => status === 'ok' || status === 'empty');
+    return {
+        ok: answered > 0,
+        status: complete ? 'done' : answered > 0 ? 'partial' : 'failed',
+        complete,
+        requestsMade,
+        queries: phrases.map(({ filters: _filters, ...phrase }) => phrase),
+        filters: mergeFilters(phrases.map(({ filters }) => filters ?? [])),
+    };
+};
+
 const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, writer }) => {
     const articles = normalizeProductArticles(job.articles);
     const units = articles.flatMap((article) =>
@@ -710,7 +829,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
             url: fillTemplate(endpoint.url, article),
         }))
     );
-    const fetched = await runWithConcurrency(units, PRODUCT_CARD_CONCURRENCY, async (unit) => {
+    const fetched = await runWithConcurrency(units, PRODUCT_CARD_CONCURRENCY, countRunProgress(units.length, async (unit) => {
         try {
             const response = await requestWbFetch(unit.url, job.timeout ?? REQUEST_TIMEOUT_MS, authorizationId);
             await writer.append({ jobId: job.jobId, ...unit, response, ...buyerResponseErrorFields(response) });
@@ -724,7 +843,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
             });
             return { ...unit, ok: false, ...buyerErrorFields(error) };
         }
-    });
+    }));
 
     const products = articles.map((article) => {
         const articleUnits = fetched.filter((unit) => unit.nmId === article.nm);
@@ -1353,6 +1472,13 @@ export const executeAuthorizedBrowserJob = async ({
         });
     } else if (authorization.jobType === 'check_by_query') {
         result = await executeCheckByQueryJob({
+            authorizationId: authorization.authorizationId,
+            job: authorization.job,
+            requestWbFetch,
+            writer,
+        });
+    } else if (authorization.jobType === 'filters_by_query') {
+        result = await executeFiltersByQueryJob({
             authorizationId: authorization.authorizationId,
             job: authorization.job,
             requestWbFetch,

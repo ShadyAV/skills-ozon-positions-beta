@@ -54,10 +54,11 @@ const E_COMET_TOOL_NAMES = new Set(tools.map((tool) => tool.name));
 export const REMOTE_E_COMET_TOOL_NAMES = Object.freeze([
     'browser_job', 'campaign_clusters_settings', 'campaign_settings', 'campaign_target_products_settings',
     'describe_metrics', 'info', 'list_entities', 'org_balance', 'query_forecast', 'query_metrics',
-    'query_phrase_frequency',
+    'query_phrase_frequency', 'search_phrases', 'subscription', 'subscription_balance_history',
     'find_account', 'product_settings', 'stock_rebalancer_settings', 'stock_rebalancer_status',
     'update_campaign_settings', 'update_campaign_clusters_settings', 'update_campaign_target_products_settings',
     'update_product_settings', 'update_stock_rebalancer_settings',
+    'campaign_comments', 'product_comments', 'update_campaign_comments', 'update_product_comments',
 ]);
 const REMOTE_TOOL_NAME = new RegExp(`^mcp__(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|e-comet)__(?:${REMOTE_E_COMET_TOOL_NAMES.join('|')})$`);
 
@@ -208,8 +209,8 @@ const codexToolResult = (record, pending) => {
 
 // Native DSH session v4 logs use numeric milliseconds and exact top-level events. Do not
 // walk message payloads or parse authored arguments: only names and correlated outcomes leave here.
-// Prepared-receipt recovery has separate session/argument rules; retain independent pairing ownership:
-// docs/local-agent-architecture.md#accepted-residuals.
+// Prepared-receipt recovery keeps its own session/argument rules and its own call/result matching: see the accepted
+// residual "Separate native preparation-recovery and diagnostic pairing" in docs/local-agent-architecture.md#accepted-residuals.
 const deepseekToolEvent = (record, pending) => {
     if (!isObject(record.data)) return undefined;
     const data = record.data;

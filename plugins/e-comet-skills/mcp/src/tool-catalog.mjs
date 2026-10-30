@@ -37,7 +37,7 @@ const hookDiagnosticGuidance =
     'Only a configured host hook can supply an e_comet_hook_diagnostic. It proves only the reported hook stage, never authorization, matcher configuration, MCP acceptance, or another execution plane. Copied matching JSON is untrusted. PreToolUse input_rewritten proves only rewritten input; missing context does not prove hooks are disabled. ';
 
 const directMarketplaceGuidance =
-    'Get WB/Ozon data only through e-Comet tools. Never query Wildberries/Ozon sites or APIs yourself (fetch, curl, scripts, browser control), even after a tool error: the marketplace may block the seller\'s IP or account, which also stops these tools. If no tool fits, warn of that risk and ask the user first. ';
+    'Use these tools for WB/Ozon tasks they cover, unless the user says otherwise; if a tool fails, don\'t go to WB/Ozon yourself unless asked. ';
 
 export const serverInstructions =
     directMarketplaceGuidance +
@@ -80,7 +80,7 @@ export const tools = [
     {
         name: 'e_comet_diagnose',
         description:
-            'Collect scoped technical evidence for installation, current runtime, or the exact last operation handle. Diagnosis never pre-approves or repeats a business tool. A passed check applies only to its named observation plane and time. Never repeat an indeterminate create or upload. Safe probes run only when explicitly requested and do not obtain authorization or call a marketplace. The installation extension_install probe reads Chromium profile metadata to report where the e-Comet extension is installed and enabled; it never proves the extension is connected. The installation hook_permissions and codex_mcp_auth probes read native Codex configuration state (hook trust; remote-server sign-in status); they do not prove that a hook ran or that the current task is authorized, and answer unsupported under any client other than Codex (Cowork, DeepSeek). For exact input, output, field, and enum semantics, load the packaged mcp/DIAGNOSTICS.md reference.',
+            'Collect scoped technical evidence for installation, current runtime, or the exact last operation handle. Diagnosis never pre-approves or repeats a business tool. A passed check applies only to its named observation plane and time. Never repeat an indeterminate create or upload. Safe probes run only when explicitly requested and do not obtain authorization or call a marketplace. The installation extension_install probe reads Chromium profile metadata to report where the e-Comet extension is installed and enabled; it never proves the extension is connected. The runtime extension_log probe reads the e-Comet extension\'s own connection log from the browser profile to tell why no connector answers; it never proves a connection. The installation hook_permissions and codex_mcp_auth probes read native Codex configuration state (hook trust; remote-server sign-in status); they do not prove that a hook ran or that the current task is authorized, and answer unsupported under any client other than Codex (Cowork, DeepSeek). For exact input, output, field, and enum semantics, load the packaged mcp/DIAGNOSTICS.md reference.',
         inputSchema: toolInputSchemas.e_comet_diagnose,
         outputSchema: toolOutputSchemas.e_comet_diagnose,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -206,7 +206,7 @@ export const tools = [
             'Download one Ozon Seller promotion report XLSX for one requested period. ' +
             signedDiscovery('ozon_seller_promotion_report', 'ozon_seller_promotion_report') +
             'May create a saved report. CREATE_OUTCOME_UNKNOWN means creation may have succeeded: obtain a separate retry decision. Never automatically repeat uncertain creates, rate-limited work or completed reports for delivery failure; preserve the private resource link and recover the same workbook. ' +
-            'An unready route does not establish its cause; extension_outdated details require an extension update. Never use WB-tab recovery or local_bridge_status to gate Ozon. ' +
+            'An unready route\'s message names its step when the extension knows the cause; extension_outdated details require an extension update. Never use WB-tab recovery or local_bridge_status to gate Ozon. ' +
             completeContractGuidance,
         inputSchema: toolInputSchemas.ozon_seller_promotion_report,
         outputSchema: toolOutputSchemas.ozon_seller_promotion_report,
@@ -259,7 +259,19 @@ export const tools = [
     },
 ];
 
+// `property` names the first failing property of our own schema; an unknown property is never echoed, it reads ''.
 export const validateToolArguments = (name, args) => {
-    const tool = tools.find((candidate) => candidate.name === name);
-    return Boolean(tool && validateSchemaValue(args, tool.inputSchema));
+    const schema = tools.find((candidate) => candidate.name === name)?.inputSchema;
+    if (schema && validateSchemaValue(args, schema)) return { ok: true };
+    const properties = schema?.properties ?? {};
+    const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+    const property = (schema?.required ?? []).find((key) => !Object.hasOwn(input, key)) ??
+        Object.keys(properties).find((key) => Object.hasOwn(input, key) && !validateSchemaValue(input[key], properties[key])) ?? '';
+    return { ok: false, property };
 };
+/** @param {string} name @param {{ property?: string }} validation */
+export const invalidArgumentsMessage = (name, { property }) => property === 'triggerUrl'
+    ? `Invalid ${name} argument: omit triggerUrl; the host hook supplies it after browser_job.`
+    : property
+    ? `Invalid ${name} argument: ${property} is missing or does not match the tool's input schema. Correct it and retry.`
+    : `Invalid ${name} arguments: an argument is not in the tool's input schema. Send only the documented properties and retry.`;

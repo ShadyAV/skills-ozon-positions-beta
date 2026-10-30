@@ -148,21 +148,30 @@ export const FEEDBACK_MAX_SUMMARY_LENGTH = 512;
 // prepares successfully cannot later be rejected while requesting its upload grant.
 export const FEEDBACK_KINDS = Object.freeze(['bug', 'wrong_data', 'missing_capability', 'unclear_contract']);
 export const FEEDBACK_MAX_BYTES = 32 * 1024 * 1024;
-// Cowork cloud route: the archive travels inside the bridged call input, so it is bounded by the
-// measured device-bridge capacity, not by the native 32 MiB budget.
-export const FEEDBACK_CLOUD_MAX_BYTES = 256 * 1024;
 // Every probe that gathers evidence while a report is prepared is abandoned after this long: the
 // extension's read-only snapshot, the installation reads, the browser-profile scan and the Codex hook
 // inspector, which needs up to five seconds for a cold start. Preparation is independent of extension
 // readiness by contract, so a stalled route may cost seconds, never the 45-second business deadline,
 // and a report is never lost to the evidence gathered for it.
 export const FEEDBACK_EVIDENCE_TIMEOUT_MS = 5000;
-// Only e-Comet's own storage may receive a device-side cloud upload; the device cannot verify hook provenance.
-// The server signs for S3 and hands the URL out under the app's storage proxy, which forwards the raw path.
-export const FEEDBACK_CLOUD_UPLOAD_DESTINATIONS = Object.freeze([
-    Object.freeze({ hostname: 'app.e-comet.io', pathPrefix: '/storage/e-comet-prod-mcp-feedback-732537603439/' }),
-]);
+// The archive's copy of the extension's own log (extension-log.json), newest rows kept. The whole log is at most 3,000
+// rows, typically well under 2 MiB, and the 32 MiB report limit also has to hold the transcript.
+export const FEEDBACK_EXTENSION_LOG_MAX_BYTES = 4 * 1024 * 1024;
+// Cowork carries the same file inside the device's inert prepare answer, and that answer carries it twice: in
+// structuredContent and in the pretty-printed text copy, escaped again on the wire. Only 64 KiB is measured safe on
+// the device bridge (the other direction; 1 MiB crashed Desktop), so the serialized answer stays within
+// FEEDBACK_CLOUD_ANSWER_MAX_BYTES, and the log gets what the projection leaves, at most 12 KiB of text.
+export const FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES = 12 * 1024;
+export const FEEDBACK_CLOUD_ANSWER_MAX_BYTES = 64 * 1024;
 export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
+// Bounds for reading the extension's own connection log from a browser profile on disk (leveldb-read.mjs), on the
+// failure path only. The log value is at most 3,000 rows, about 1-2 MiB of JSON; LevelDB rolls its write-ahead log at a
+// 4 MiB write buffer, so 8 MiB per file covers a full log or a large table; the rest of our storage's keys fit in
+// 32 MiB, the total of the one pass that reads both log keys of a profile. A file or total over its limit is not read
+// and the reader reports `truncated` instead of guessing. One profile is read: that of the browser the cause names.
+// timeoutMs bounds every file read of that pass: a failing call already waits up to a minute for the broker and for
+// the repair of its registration, so the read adds seconds, never another wait.
+export const EXTENSION_LOG_LIMITS = Object.freeze({ maxFileBytes: 8 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024, timeoutMs: 2000 });
 export const OFFICIAL_EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 // The first extension build that talks to the browser's native messaging host. Equals MINIMUM_SERVED_EXTENSION_VERSION
 // in the release gate (scripts/extension_gate.py); both change together. Tests derive their versions from it.

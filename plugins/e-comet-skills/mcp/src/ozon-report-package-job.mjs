@@ -1,3 +1,5 @@
+import { artifactFailureDetails } from './artifact-store.mjs';
+import { artifactFailureMessage } from './tool-errors.mjs';
 import { ozonPackageStopReason, rejectedOzonPackage } from './ozon-report-package-result.mjs';
 import { countRunProgress } from './run-registry.mjs';
 
@@ -117,7 +119,10 @@ export const executeOzonReportPackage = async ({
     let notStarted = false;
 
     const normalizedFailure = (item, error) => {
-        if (PRIVATE_ARTIFACT_CODES.has(error?.code)) return { ...item, status: 'failed', error: artifactFailure };
+        if (PRIVATE_ARTIFACT_CODES.has(error?.code)) {
+            const details = artifactFailureDetails(error);
+            return { ...item, status: 'failed', error: details ? { ...artifactFailure, message: artifactFailureMessage(details), details } : artifactFailure };
+        }
         let safe = unclassifiedFailure;
         try {
             safe = normalizeError(error);

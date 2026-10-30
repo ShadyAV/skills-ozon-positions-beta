@@ -24,7 +24,7 @@ Feedback failures provide only closed diagnostic evidence in `error.details`: th
 system code, HTTP status, and optional public module/line context. No raw paths, messages, stacks,
 upload secrets, or history are exposed there. A source location helps investigation; it does not prove
 the root cause. Explain the supplied safe evidence and next action without guessing missing causes.
-`UPLOAD_UNCERTAIN` and `FEEDBACK_SUBMISSION_FAILED` mean delivery cannot be confirmed; ask for user
+`UPLOAD_UNCERTAIN`, and `FEEDBACK_SUBMISSION_FAILED` without `status:"not_started"`, mean delivery cannot be confirmed; ask for user
 direction and never automatically repeat submission or restart the flow. On success, say only that
 the report was sent to e-Comet. The archive has a 32 MiB aggregate limit; the chosen history option
 is never silently changed and truncation markers are not inserted.

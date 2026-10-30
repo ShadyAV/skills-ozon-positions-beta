@@ -13,7 +13,7 @@ import { foldFeedbackLineEndings, redactFeedbackText } from '../mcp/src/feedback
 import { isPublishableObjectKey, toolInputSchemas, toolOutputSchemas, validateSchemaValue } from '../mcp/src/tool-schemas.mjs';
 import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from '../mcp/src/feedback-diagnostics.mjs';
 import { retryTransientFileOperation } from './transient-file-operation.mjs';
-import { withHookDiagnostic } from './hook-diagnostics.mjs';
+import { denialEvidence, withHookDiagnostic } from './hook-diagnostics.mjs';
 
 // PostToolUse can carry one maximum-size MCP request and response. Reserve another 256 KiB for the
 // host's session/tool metadata and platform paths while keeping malformed stdin decisively bounded.
@@ -44,7 +44,7 @@ const GRANT_HANDOFF_RESERVE_MS = 5_000;
 // WHY: the grant must survive ordinary Post->Pre scheduling and the start of the PUT. Its expiry
 // is not coupled to the uploader's longer wall deadline for completing an already-started request.
 const MIN_STAGE_GRANT_REMAINING_MS = GRANT_START_WINDOW_MS + GRANT_HANDOFF_RESERVE_MS;
-// A grant claimed inside its last minute can still expire before a bridged device starts the PUT: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
+// A grant claimed inside its last minute can still expire before the Cowork cloud PUT starts: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
 const MIN_CLAIM_GRANT_REMAINING_MS = GRANT_START_WINDOW_MS;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const HEADER_VALUE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
@@ -914,6 +914,23 @@ const deniedPreToolUseOutput = (error) => {
     });
 };
 
+// The closed cause each denial code reports in its hook diagnostic record.
+const FEEDBACK_DENIAL_CAUSES = Object.freeze({
+    ...Object.fromEntries(['FEEDBACK_INVALID_INPUT', 'FEEDBACK_MODEL_TRANSPORT'].map((code) => [code, 'invalid_input'])),
+    ...Object.fromEntries(['FEEDBACK_INVALID_EVENT', 'FEEDBACK_INVALID_SESSION', 'FEEDBACK_EVENT_TOO_LARGE'].map((code) => [code, 'invalid_event'])),
+    ...Object.fromEntries(['FEEDBACK_INVALID_STATE', 'FEEDBACK_INVALID_GRANT', 'FEEDBACK_INVALID_PREPARED', 'FEEDBACK_CLAIM_INVALID',
+        'FEEDBACK_ARTIFACT_MISMATCH', 'FEEDBACK_PREPARED_MISMATCH', 'FEEDBACK_TOOL_MISMATCH', 'FEEDBACK_GRANT_CONFLICT',
+        'FEEDBACK_UPLOAD_ALREADY_STARTED'].map((code) => [code, 'invalid_state'])),
+    ...Object.fromEntries(['FEEDBACK_GRANT_MISSING', 'FEEDBACK_PREPARED_MISSING'].map((code) => [code, 'missing'])),
+    ...Object.fromEntries(['FEEDBACK_AMBIGUOUS_GRANT', 'FEEDBACK_AMBIGUOUS_PREPARED'].map((code) => [code, 'ambiguous'])),
+    FEEDBACK_STATE_MISSING: 'state_missing',
+    FEEDBACK_GRANT_REFRESH_REQUIRED: 'expired',
+    FEEDBACK_DATA_DIR_UNAVAILABLE: 'storage_unavailable',
+    FEEDBACK_STORAGE_ERROR: 'io_error',
+    FEEDBACK_TRANSCRIPT_UNAVAILABLE: 'unsupported',
+    FEEDBACK_INTERNAL_ERROR: 'internal_error',
+});
+
 const safeHookError = (error, operation) => {
     const details = feedbackDiagnostics(error, operation);
     const owned = ownedErrors.get(error);
@@ -996,23 +1013,12 @@ const shortenReportMiddle = (text, retained) => {
     if (tail > 0 && /[\uD800-\uDBFF]/u.test(text[tail - 1]) && /[\uDC00-\uDFFF]/u.test(text[tail] ?? '')) tail += 1;
     return text.slice(0, head) + REPORT_SHORTENING_MARKER + text.slice(tail);
 };
-// The cloud route fits the same report into its smaller archive budget, so the caller may lower the
-// limit; the default stays the host wire envelope every route has to satisfy. That route must also
-// measure what canonical prepare will render: redaction expands credential-like text, so measuring the
-// authored text alone would stage a report no retry of it could ever archive. The stored text is
-// redacted exactly once more downstream, which is what `measureRendered` projects here.
+// Every route fits the report to the host wire envelope the native route has to satisfy.
 export const fitPrepareWireInput = (input, transportFields = {
     feedbackClaim: 'a'.repeat(43), feedbackSession: 'a'.repeat(64),
-}, { limitBytes = MAX_MCP_MESSAGE_BYTES - FEEDBACK_ENVELOPE_RESERVE_BYTES, measureRendered = false } = {}) => {
-    // Canonical rendering folds line endings before redacting, and the header redactors match to the
-    // end of a line: measuring CR-delimited text unfolded would collapse a whole report into one match.
-    const redacted = (value) => (typeof value === 'string' ? redactFeedbackText(foldFeedbackLineEndings(value)) : value);
-    const measured = (value) => (measureRendered
-        ? { ...value, summary: redacted(value.summary), details: redacted(value.details) } : value);
-    const wireBytes = (value) => byteLength(JSON.stringify({ ...value, ...transportFields }));
-    // The archive projection can shrink credentials or expand redaction markers. Both it and the
-    // actual injected input must fit: measuring only the projection lets oversized raw text escape.
-    const fits = (value) => wireBytes(value) <= limitBytes && wireBytes(measured(value)) <= limitBytes;
+}) => {
+    const fits = (value) => byteLength(JSON.stringify({ ...value, ...transportFields }))
+        <= MAX_MCP_MESSAGE_BYTES - FEEDBACK_ENVELOPE_RESERVE_BYTES;
     if (fits(input)) return input;
     // Cutting a header/key away from its credential value defeats contextual redaction.
     // Redact whole source fields before any cut, then bind only the final safe text. Line endings are
@@ -1054,7 +1060,7 @@ const loadSigningSecret = async (env) => {
     }
 };
 
-const processHookEventAuthoritative = async (event, _options = {}) => {
+const processHookEventAuthoritative = async (event, _options = {}, observed = {}) => {
     if (!isRecord(event)) {
         const error = new FeedbackHandoffError('FEEDBACK_INVALID_EVENT', 'The desktop hook event is invalid.');
         return { exitCode: 2, stdout: '', stderr: `${error.code}: ${error.message}` };
@@ -1196,6 +1202,7 @@ const processHookEventAuthoritative = async (event, _options = {}) => {
             };
         } catch (error) {
             const safeError = safeHookError(error, 'handoff_prepare');
+            observed.denial = safeError;
             return { exitCode: 0, stdout: deniedPreToolUseOutput(safeError), stderr: '' };
         }
     }
@@ -1244,6 +1251,7 @@ const processHookEventAuthoritative = async (event, _options = {}) => {
             };
         } catch (error) {
             const safeError = safeHookError(error, 'handoff_submit');
+            observed.denial = safeError;
             return { exitCode: 0, stdout: deniedPreToolUseOutput(safeError), stderr: '' };
         }
     }
@@ -1267,7 +1275,8 @@ const feedbackDiagnosticOutcome = (result, eventName) => {
 };
 
 export const processHookEvent = async (event, options = {}) => {
-    const result = await processHookEventAuthoritative(event, options);
+    const observed = {};
+    const result = await processHookEventAuthoritative(event, options, observed);
     const eventName = event?.hook_event_name ?? event?.hookEventName;
     const toolName = event?.tool_name ?? event?.toolName;
     let cloud = CLOUD_FEEDBACK_TOOL.test(toolName);
@@ -1306,6 +1315,8 @@ export const processHookEvent = async (event, options = {}) => {
         outcome: feedbackDiagnosticOutcome(result, eventName),
         observedAt: new Date(options.nowMs ?? options.cloud?.now?.() ?? Date.now()).toISOString(),
         executionPlane: cloud ? 'cloud' : 'native',
+        ...(decision === 'deny' && observed.denial
+            ? denialEvidence(FEEDBACK_DENIAL_CAUSES[observed.denial.code] ?? observed.denial.details?.reason, observed.denial.details?.systemCode) : {}),
     }));
 };
 

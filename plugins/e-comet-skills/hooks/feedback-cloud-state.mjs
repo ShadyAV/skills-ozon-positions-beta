@@ -14,9 +14,8 @@ const HASH = /^[a-f0-9]{64}$/;
 const RECORD_NAME = /^[a-f0-9]{64}\.json$/;
 const RESIDUE_NAME = /^[a-f0-9]{64}\.(?:running|[0-9a-f-]{36}\.tmp)$/;
 const TERMINAL_STATUSES = ['uploaded', 'rejected', 'uncertain', 'not_started', 'failed'];
-export const TERMINAL_DEVICE_REFUSALS = ['UPLOAD_DESTINATION_REFUSED', 'FEEDBACK_ARCHIVE_MISMATCH'];
-export const canRetryUploadOutcome = result => result?.status === 'not_started'
-    || (result?.status === 'failed' && !TERMINAL_DEVICE_REFUSALS.includes(result.error?.code));
+// A no-send outcome lets the same artifact be submitted again; every other one blocks a repeat.
+export const canRetryUploadOutcome = result => ['not_started', 'failed'].includes(result?.status);
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const encoded = value => JSON.stringify(value);
@@ -26,9 +25,8 @@ const invalid = () => failure('invalid_state');
 const missingState = error => error?.code === 'ENOENT'
     ? Object.assign(failure('state_missing'), { code: 'ENOENT', cause: error }) : error;
 const validTime = value => Number.isSafeInteger(value) && value >= 0;
-// The six transport fields claimUploadGrant returns. A pending submit operation keeps them so a
-// duplicated PreToolUse for the same call can re-emit the input it already injected; the archive
-// itself is never written here.
+// The six transport fields claimUploadGrant returns. A pending submit operation keeps them for the
+// PostToolUse that uploads; the archive itself is never written here.
 const TRANSPORT_FIELDS = ['uploadUrl', 'requiredHeaders', 'objectKey', 'expiresAt', 'expectedSize', 'expectedSha256'];
 const MAX_TRANSPORT_BYTES = 64 * 1024;
 const validOperationTransport = transport => record(transport)
@@ -36,8 +34,8 @@ const validOperationTransport = transport => record(transport)
     && TRANSPORT_FIELDS.every(key => Object.hasOwn(transport, key))
     && typeof transport.uploadUrl === 'string' && transport.uploadUrl.length > 0
     && record(transport.requiredHeaders)
-    // The device publishes this key to the seller, so a re-emitted transport must clear the same bound the
-    // grant cleared when it was claimed.
+    // The hook publishes this key to the seller as the report ID, so the staged transport must clear the
+    // same bound the grant cleared when it was claimed.
     && isPublishableObjectKey(transport.objectKey)
     && Number.isSafeInteger(transport.expiresAt) && transport.expiresAt > 0
     && Number.isSafeInteger(transport.expectedSize) && transport.expectedSize > 0 && transport.expectedSize <= FEEDBACK_MAX_BYTES
@@ -54,10 +52,6 @@ const validAttempt = attempt => attempt?.version === 1 && HASH.test(attempt.sess
     && UUID.test(attempt.artifactId) && UUID.test(attempt.attemptId) && HASH.test(attempt.sha256)
     && validTime(attempt.createdAtMs) && Number.isSafeInteger(attempt.sizeBytes) && attempt.sizeBytes > 0
     && attempt.sizeBytes <= FEEDBACK_MAX_BYTES && typeof attempt.transcriptIncluded === 'boolean'
-    // Records the previous build wrote carry no callId and stay readable for the rest of their retention;
-    // only a recorded one can match a repeated PreToolUse for the same call.
-    && (attempt.callId === undefined
-        || (typeof attempt.callId === 'string' && attempt.callId.length > 0 && Buffer.byteLength(attempt.callId, 'utf8') <= 512))
     && (attempt.status === 'started'
         || (TERMINAL_STATUSES.includes(attempt.status)
             && attempt.result?.artifactId === attempt.artifactId
@@ -274,15 +268,6 @@ export class CloudFeedbackStore {
                 error: { code: 'UPLOAD_UNCERTAIN', message: 'An upload intent exists without a confirmed outcome. Do not send this artifact again.', stage: 'upload', retryable: false },
             },
         };
-    }
-
-    // Reconstructs the owner handle of a started attempt written by another process (submit Pre), so
-    // the Post that receives the device result can record the outcome with the same attemptId check.
-    async attemptHandle(sessionId, artifactId) {
-        const outcome = await this.readArtifactOutcome(sessionId, artifactId);
-        if (outcome === undefined || outcome.status !== 'started') return undefined;
-        const { result, terminal, ...intent } = outcome;
-        return { path: this.attemptPath(sessionId, artifactId), intent };
     }
 
     async beginUploadAttempt(sessionId, metadata) {

@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { feedbackDiagnostics } from '../mcp/src/feedback-diagnostics.mjs';
 import { sweepExpired } from '../mcp/src/file-retention.mjs';
 import { retryTransientFileOperation } from './transient-file-operation.mjs';
-import { withHookDiagnostic } from './hook-diagnostics.mjs';
+import { denialEvidence, withHookDiagnostic } from './hook-diagnostics.mjs';
 
 const MAX_HOOK_EVENT_BYTES = 1024 * 1024;
 export const MAX_SESSION_ID_BYTES = 512;
@@ -358,6 +358,23 @@ const deniedPreToolUseOutput = (error) =>
         },
     });
 
+// The closed cause each denial code reports in its hook diagnostic record.
+const HANDOFF_CAUSES = Object.freeze({
+    HANDOFF_MISSING: 'missing',
+    HANDOFF_TOOL_MISMATCH: 'missing',
+    HANDOFF_EXPIRED: 'expired',
+    HANDOFF_DATA_DIR_UNAVAILABLE: 'storage_unavailable',
+    HANDOFF_STORAGE_ERROR: 'io_error',
+    HANDOFF_INVALID_INPUT: 'invalid_input',
+    HANDOFF_MODEL_AUTHORIZATION: 'invalid_input',
+    HANDOFF_INVALID_SESSION: 'invalid_event',
+    HANDOFF_INVALID_EVENT: 'invalid_event',
+    HANDOFF_INVALID_ENTRY: 'invalid_state',
+    HANDOFF_INVALID_TOKEN: 'invalid_state',
+    HANDOFF_INVALID_TOOL: 'unsupported',
+    HANDOFF_AMBIGUOUS_TOKEN: 'ambiguous',
+});
+
 const safeHookError = (error, operation = 'handoff_authorize') => {
     if (error instanceof HandoffError) return error;
     const safe = new HandoffError('HANDOFF_STORAGE_ERROR', 'The local browser authorization handoff failed.');
@@ -377,7 +394,7 @@ const browserJobTargetTool = (event) => {
     return validateTargetTool(LOCAL_TOOL_BY_BROWSER_JOB_TYPE[job.type]);
 };
 
-const processHookEventAuthoritative = async (event, { env = process.env, nowMs = Date.now(), fileNow = Date.now } = {}) => {
+const processHookEventAuthoritative = async (event, { env = process.env, nowMs = Date.now(), fileNow = Date.now } = {}, observed = {}) => {
     if (!event || typeof event !== 'object') {
         const error = new HandoffError('HANDOFF_INVALID_EVENT', 'The desktop hook event is invalid.');
         return { exitCode: 2, stdout: '', stderr: `${error.code}: ${error.message}` };
@@ -441,6 +458,7 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
             };
         } catch (error) {
             const safeError = safeHookError(error, 'claim_consume');
+            observed.denial = safeError;
             return { exitCode: 0, stdout: deniedPreToolUseOutput(safeError), stderr: '' };
         }
     }
@@ -449,7 +467,8 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
 };
 
 export const processHookEvent = async (event, options = {}) => {
-    const result = await processHookEventAuthoritative(event, options);
+    const observed = {};
+    const result = await processHookEventAuthoritative(event, options, observed);
     const eventName = event?.hook_event_name ?? event?.hookEventName;
     const toolName = event?.tool_name ?? event?.toolName;
     const isPost = eventName === 'PostToolUse' && REMOTE_BROWSER_JOB_TOOL.test(toolName);
@@ -466,6 +485,7 @@ export const processHookEvent = async (event, options = {}) => {
         outcome: decision === 'deny' ? 'denied' : 'succeeded',
         observedAt: new Date(options.nowMs ?? Date.now()).toISOString(),
         executionPlane: typeof toolName === 'string' && toolName.startsWith('mcp__remote-devices__') ? 'cloud' : 'native',
+        ...(decision === 'deny' && observed.denial ? denialEvidence(HANDOFF_CAUSES[observed.denial.code], observed.denial.details?.systemCode) : {}),
     }));
 };
 

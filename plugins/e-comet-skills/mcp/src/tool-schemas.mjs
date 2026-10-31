@@ -642,7 +642,7 @@ const triggerUrlProperty = {
     maxLength: MAX_BROWSER_JOB_TOKEN_BYTES,
     description:
         'Opaque browser authorization injected by the trusted Claude or Codex host hook immediately before this local tool call. ' +
-        'It is transport-only; model-authored arguments must omit both triggerUrl and trigger_url. The conservative schema maxLength is a character count; ' +
+        'It is transport-only; model-authored arguments must omit both triggerUrl and trigger_url, except for an mcp__remote-devices__ tool, which gets the browser_job trigger_url unchanged. The conservative schema maxLength is a character count; ' +
         'runtime authoritatively enforces the 128 KiB UTF-8 byte limit.',
 };
 
@@ -651,7 +651,7 @@ const ozonTriggerUrlProperty = {
     minLength: 1,
     maxLength: MAX_BROWSER_JOB_TOKEN_BYTES,
     description:
-        'Opaque browser authorization injected by the trusted Claude or Codex host hook immediately before this Ozon tool call. It is transport-only; model-authored arguments must omit both triggerUrl and trigger_url.',
+        'Opaque browser authorization injected by the trusted Claude or Codex host hook immediately before this Ozon tool call. It is transport-only; model-authored arguments must omit both triggerUrl and trigger_url, except for an mcp__remote-devices__ tool, which gets the browser_job trigger_url unchanged.',
 };
 
 const canonicalDateProperty = {

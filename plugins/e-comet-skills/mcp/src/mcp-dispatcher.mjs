@@ -154,6 +154,7 @@ const ozonPackageCapabilityFailure = (family, status) => {
 const missingHandoff = () => new ToolExecutionError('BROWSER_JOB_HANDOFF_REQUIRED',
     'Browser authorization handoff is required: the host plugin hook did not pass the signed authorization to this tool. ' +
     'In Codex this usually means the e-Comet hooks await approval again after a plugin update. ' +
+    'For an mcp__remote-devices__ tool, pass trigger_url from the same browser_job result, unchanged, as triggerUrl and call this tool once more. ' +
     'Do not repeat browser_job until that is resolved.', 'handoff', false);
 
 export const classifyOzonAuthorizationFailure = (error, status, packageFamily) => {

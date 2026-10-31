@@ -1,14 +1,14 @@
 import { OZON_PROMOTION_MIN_EXTENSION_VERSION } from './extension-vocabulary.mjs';
 import { MAX_OZON_REPORT_PACKAGE_ITEMS } from './ozon-report-package-domain.mjs';
 
-const claudeSandboxStep =
-    'Claude runs plugin hooks only after the conversation sandbox starts: if this tool is named mcp__remote-devices__... and no shell command has run in this conversation, first run one no-op shell command (true) with the host Bash tool, then call browser_job. ';
+const coworkCopyStep =
+    'Exception: if this tool is named mcp__remote-devices__..., the host refuses hook-changed arguments, so pass the browser_job result\'s trigger_url yourself, unchanged, as triggerUrl. ';
 
 const authorizationWorkflow =
     'This typed local tool owns the workflow: select it based on user intent, then call the remote e-Comet browser_job exactly once with the matching typed job and immediately invoke this tool. ' +
-    'In Claude and Codex, model-authored arguments must omit both triggerUrl and trigger_url so the trusted host hook can inject the transport-only authorization immediately before this local call. ' +
-    claudeSandboxStep +
-    'Never decode, print, edit, copy, or expose the authorization. Do not infer an authorization failure from client status: attempt the actual remote call and report only the confirmed error in user-friendly language. If a tool is missing from the catalog, repeat the host tool search up to three times; never repeat browser_job or this tool to make an error disappear. ';
+    'In Claude Code and Codex, model-authored arguments must omit both triggerUrl and trigger_url so the trusted host hook can inject the transport-only authorization immediately before this local call. ' +
+    coworkCopyStep +
+    'Never decode, print, edit, or expose the authorization. Do not infer an authorization failure from client status: attempt the actual remote call and report only the confirmed error in user-friendly language. If a tool is missing from the catalog, repeat the host tool search up to three times; never repeat browser_job or this tool to make an error disappear. ';
 
 const ozonScopeGuard =
     'e-Comet Ozon tools cover exactly three needs: Ozon Seller promotion analytics reports, Ozon Seller general analytics reports, and Ozon search places of given SKUs for given queries. ' +
@@ -16,8 +16,8 @@ const ozonScopeGuard =
     'do not call browser_job, do not substitute the nearest tool, and do not run any Ozon tool as a probe; say that only these three exist and ask what the user wants. ';
 
 const ozonHookInjection =
-    'The trusted Claude or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. Never decode, print, edit, copy, or expose that authorization. ' +
-    claudeSandboxStep;
+    'The trusted Claude Code or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. ' +
+    coworkCopyStep + 'Never decode, print, edit, or expose that authorization. ';
 
 const ozonPackageContext =
     'The extension automatically uses the first ready Seller context and pins its company for this package; never ask the user to focus a tab. A fresh authorization uses the then-current context and does not guarantee the previous company. ' +
@@ -73,7 +73,7 @@ const localBridgeFailureGuidance =
     'For LOCAL_STORAGE_FAILED, use details.systemCode and the message when supplied to distinguish access, space/quota and path conflicts; do not infer the cause from the generic code alone. ';
 
 const rejectionAndHandoffGuidance =
-    'BROWSER_JOB_HANDOFF_REQUIRED (stage handoff) means this tool ran without hook-injected authorization: the host hook did not run or did not rewrite the input, because the plugin hooks are not trusted, are disabled, changed after a plugin update, or the host does not run plugin hooks in this task. It is not a marketplace, extension or account failure. Do not call browser_job or this tool again until that is resolved; each repeat spends one signed authorization. On Codex run e_comet_diagnose with installation scope, safe_probes and the hook_permissions probe and follow its result: on disabled or review_required ask the user to enable and trust all e-Comet handlers at once in Settings → Plugins → Personal → e-Comet MCP Tools → Hooks, not only the ones this task needs (Codex asks again after every plugin update), on ready or not_checked the cause is not established; on Claude Code /hooks lists the configured hooks; in Claude with mcp__remote-devices__... tool names, if no shell command had run in this conversation, its sandbox and hooks had not started: run one no-op shell command (true), then call browser_job once and this tool once; a new task starts without the sandbox again; otherwise verify that the plugin is installed and enabled in Customize → Plugins → Yours. retryable:true never authorizes an automatic repeat. ' +
+    'BROWSER_JOB_HANDOFF_REQUIRED (stage handoff) means this tool ran without hook-injected authorization: the host hook did not run or did not rewrite the input, because the plugin hooks are not trusted, are disabled, changed after a plugin update, or the host does not run plugin hooks in this task. It is not a marketplace, extension or account failure. Do not call browser_job or this tool again until that is resolved; each repeat spends one signed authorization. On Codex run e_comet_diagnose with installation scope, safe_probes and the hook_permissions probe and follow its result: on disabled or review_required ask the user to enable and trust all e-Comet handlers at once in Settings → Plugins → Personal → e-Comet MCP Tools → Hooks, not only the ones this task needs (Codex asks again after every plugin update), on ready or not_checked the cause is not established; on Claude Code /hooks lists the configured hooks; with mcp__remote-devices__... tool names the call lacked triggerUrl: pass trigger_url from the same browser_job result, unchanged, as triggerUrl and call this tool once more, without a new browser_job.retryable:true never authorizes an automatic repeat. ' +
     'A HANDOFF_TOKEN_NOT_FOUND hook error beside the browser_job result means the hook found no authorization in the result the host handed it; the HANDOFF_MISSING this tool then answers follows from it, not from the call order. Do not repeat browser_job: offer to report, with the responseShape it names. ' +
     'A whole-call BROWSER_JOB_REJECTED or BROWSER_JOB_ACCOUNT_MISMATCH (for Ozon tools, OZON_AUTHORIZATION_REJECTED with the same details) carries details.browserJobRejection.reason: ecomet_not_authenticated means the extension is not activated, and the user activates it with the API key from the e-Comet account (https://app.e-comet.io/account) in the browser where it is connected; subject_mismatch (code BROWSER_JOB_ACCOUNT_MISMATCH) means the extension is activated with a different e-Comet account than the connector, and the user uses the same account on both; expired or token_reuse need one fresh browser_job on the user\'s decision; for device_clock_ahead, device_clock_behind and storage_unavailable the message names the user\'s step (sync the clock, restart the browser), then one fresh browser_job on the user\'s decision; user_not_available: the user checks the extension\'s activation with the API key, then one fresh browser_job on the user\'s decision, and a repeat is reported; every other reason is an e-Comet defect to report, not a user change. See the packaged mcp/DIAGNOSTICS.md section "Missing authorization handoff". ';
 
@@ -144,7 +144,8 @@ const recommendationsContract =
 const sellerReviewsContract =
             'Original WB seller-review XLSX. ' +
             'Call remote browser_job once: job {type:"seller_reviews",exports:[{product_id?:int,dateFrom?,dateTo?,isAnswered?:bool,ratings?:[1|2|3|4|5,...],content?},...],org?}, then immediately this tool. ' +
-            'Trusted Claude/Codex hooks inject authorization: omit triggerUrl/trigger_url; never decode, print, edit, copy or expose it. ' +
+            'Trusted Claude Code/Codex hooks inject authorization: omit triggerUrl/trigger_url. ' + coworkCopyStep +
+            'Never decode, print, edit or expose it. ' +
             'Never infer authorization failure from status. ' +
             rejectionAndHandoffGuidance +
             'Repeat host tool search up to 3x for a missing tool; never repeat browser_job or this tool; explain confirmed errors. ' +

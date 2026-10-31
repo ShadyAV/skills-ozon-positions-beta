@@ -21,7 +21,7 @@ const signedContractTargets = SIGNED_CONTRACT_TOOL_NAMES.join(', ');
 const signedDiscovery = (name, type) =>
     `If its complete contract is not already in the current task, call describe_e_comet_tool({name:"${name}"}) and await it before browser_job. ` +
     `Then call browser_job once with the matching ${type} descriptor and immediately this local tool exactly once; do not insert discovery between them. ` +
-    'Omit triggerUrl and trigger_url; the trusted hook injects authorization. Never decode, print, edit, copy, or expose it. ';
+    'Omit triggerUrl and trigger_url; the trusted hook injects authorization. Only for mcp__remote-devices__ tools pass the browser_job trigger_url yourself, unchanged, as triggerUrl. Never decode, print, edit, or expose it. ';
 
 const completeContractGuidance = 'Follow the returned complete contract for exact descriptors, defaults, fields and recovery.';
 
@@ -271,7 +271,7 @@ export const validateToolArguments = (name, args) => {
 };
 /** @param {string} name @param {{ property?: string }} validation */
 export const invalidArgumentsMessage = (name, { property }) => property === 'triggerUrl'
-    ? `Invalid ${name} argument: omit triggerUrl; the host hook supplies it after browser_job.`
+    ? `Invalid ${name} argument: omit triggerUrl; the host hook supplies it after browser_job. Only for an mcp__remote-devices__ tool, pass the browser_job trigger_url unchanged.`
     : property
     ? `Invalid ${name} argument: ${property} is missing or does not match the tool's input schema. Correct it and retry.`
     : `Invalid ${name} arguments: an argument is not in the tool's input schema. Send only the documented properties and retry.`;

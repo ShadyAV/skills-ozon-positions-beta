@@ -351,6 +351,7 @@ const preToolUseOutput = (updatedInput) =>
 
 const handoffRecovery = (code) => {
     // Refusals before claim consumption must not manufacture a second pending authorization.
+    if (code === 'HANDOFF_COPY_REQUIRED') return 'Pass trigger_url from the same browser_job result, unchanged, as triggerUrl and retry the same local tool once; do not call browser_job again.';
     if (code === 'HANDOFF_MODEL_AUTHORIZATION') return 'Remove triggerUrl and trigger_url from the model-authored arguments and retry the same local tool. The hook must inject authorization; do not request a new browser_job for this argument correction.';
     if (code === 'HANDOFF_INVALID_INPUT') return 'Correct the local tool arguments and retry the same local tool; do not request another authorization just to repair arguments.';
     if (code === 'HANDOFF_DATA_DIR_UNAVAILABLE') return 'The host did not provide plugin storage. Check the installed plugin and host hook integration; requesting another browser_job cannot fix missing host storage.';
@@ -383,6 +384,7 @@ const HANDOFF_CAUSES = Object.freeze({
     HANDOFF_STORAGE_ERROR: 'io_error',
     HANDOFF_INVALID_INPUT: 'invalid_input',
     HANDOFF_MODEL_AUTHORIZATION: 'invalid_input',
+    HANDOFF_COPY_REQUIRED: 'invalid_input',
     HANDOFF_INVALID_SESSION: 'invalid_event',
     HANDOFF_INVALID_EVENT: 'invalid_event',
     HANDOFF_INVALID_ENTRY: 'invalid_state',
@@ -454,6 +456,16 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
                 throw new HandoffError('HANDOFF_INVALID_INPUT', 'The local browser-job arguments are invalid.');
             }
             const targetTool = toolName.slice(toolName.lastIndexOf('__') + 2);
+            // WHY: since 2026-10-30 Cowork refuses a device call whose input a cloud hook changed, so there the model
+            // copies trigger_url itself and the call passes untouched; the signed token, not its carrier, is the check.
+            // Accepted residual "Cowork: the model carries the browser authorization"; FE-1547 replaces it.
+            if (toolName.startsWith('mcp__remote-devices__')) {
+                if (typeof toolInput.triggerUrl === 'string' && toolInput.triggerUrl) return { exitCode: 0, stdout: '', stderr: '' };
+                throw new HandoffError(
+                    'HANDOFF_COPY_REQUIRED',
+                    'This host refuses a local call whose arguments a plugin hook changed, so the hook cannot add the authorization.'
+                );
+            }
             if (
                 Object.prototype.hasOwnProperty.call(toolInput, 'triggerUrl') ||
                 Object.prototype.hasOwnProperty.call(toolInput, 'trigger_url')
@@ -492,7 +504,8 @@ export const processHookEvent = async (event, options = {}) => {
     const toolName = event?.tool_name ?? event?.toolName;
     const isPost = eventName === 'PostToolUse' && REMOTE_BROWSER_JOB_TOOL.test(toolName);
     const isPre = eventName === 'PreToolUse' && LOCAL_BROWSER_TOOL.test(toolName);
-    if ((!isPost && !isPre) || result.exitCode !== 0) return result;
+    // A Cowork call that passes untouched has nothing to record: the hook neither rewrote nor denied it.
+    if ((!isPost && !isPre) || result.exitCode !== 0 || (isPre && result.stdout === '')) return result;
     let decision;
     if (result.stdout) {
         try { decision = JSON.parse(result.stdout).hookSpecificOutput?.permissionDecision; }

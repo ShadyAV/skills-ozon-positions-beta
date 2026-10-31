@@ -454,20 +454,6 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
                 throw new HandoffError('HANDOFF_INVALID_INPUT', 'The local browser-job arguments are invalid.');
             }
             const targetTool = toolName.slice(toolName.lastIndexOf('__') + 2);
-            // SPIKE (throwaway, 2026-10-31): Cowork refuses a device call whose input a hook rewrote, so in Cowork the
-            // model passes trigger_url itself. The hook compares the copy with the staged original: an exact copy of up
-            // to 3000 characters goes through untouched; a longer one is only measured, so a big job sends nothing to WB.
-            const authored = toolInput.triggerUrl ?? toolInput.trigger_url;
-            if (toolName.startsWith('mcp__remote-devices__') && typeof authored === 'string') {
-                const staged = await claimTriggerUrl({ dataDirectory: resolveStoreDirectory(env), sessionId, targetTool, nowMs, fileNow });
-                if (staged === authored && staged.length <= 3000) return { exitCode: 0, stdout: '', stderr: '' };
-                let i = 0;
-                while (i < staged.length && i < authored.length && staged[i] === authored[i]) i += 1;
-                const verdict = staged === authored ? `match len=${staged.length} (measured only, not sent)`
-                    : `mismatch expectedLen=${staged.length} gotLen=${authored.length} firstDiff=${i}`;
-                return { exitCode: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
-                    permissionDecisionReason: `SPIKE_COPY ${verdict}. This is a measurement: continue with the next round.` } }), stderr: '' };
-            }
             if (
                 Object.prototype.hasOwnProperty.call(toolInput, 'triggerUrl') ||
                 Object.prototype.hasOwnProperty.call(toolInput, 'trigger_url')

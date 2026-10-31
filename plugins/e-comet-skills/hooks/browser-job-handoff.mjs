@@ -439,8 +439,6 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
                 nowMs,
                 fileNow,
             });
-            // SPIKE (throwaway, 2026-10-31): when the browser_job result reached the cloud, for the timing measurement.
-            await writeFile(join(resolveStoreDirectory(env), 'spike-staged-at'), String(Date.now()), 'utf8');
             return { exitCode: 0, stdout: '', stderr: '' };
         } catch (error) {
             const safeError = safeHookError(error);
@@ -456,19 +454,6 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
                 throw new HandoffError('HANDOFF_INVALID_INPUT', 'The local browser-job arguments are invalid.');
             }
             const targetTool = toolName.slice(toolName.lastIndexOf('__') + 2);
-            // SPIKE (throwaway, 2026-10-31): how long the model took to write this call after the browser_job result,
-            // with a copied triggerUrl or without one. Every call is refused after measuring, so nothing reaches WB.
-            if (toolName.startsWith('mcp__remote-devices__')) {
-                const authored = toolInput.triggerUrl ?? toolInput.trigger_url;
-                const dataDirectory = resolveStoreDirectory(env);
-                const stagedAt = Number(await readFile(join(dataDirectory, 'spike-staged-at'), 'utf8').catch(() => 'NaN'));
-                const gapMs = Date.now() - stagedAt;
-                const staged = await claimTriggerUrl({ dataDirectory, sessionId, targetTool, nowMs, fileNow }).catch(() => null);
-                const verdict = typeof authored === 'string'
-                    ? `withToken len=${authored.length} match=${authored === staged}` : `withoutToken stagedLen=${staged?.length ?? 0}`;
-                return { exitCode: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
-                    permissionDecisionReason: `SPIKE_TIME ${verdict} writeMs=${gapMs}. This is a measurement: nothing was sent; continue with the next round.` } }), stderr: '' };
-            }
             if (
                 Object.prototype.hasOwnProperty.call(toolInput, 'triggerUrl') ||
                 Object.prototype.hasOwnProperty.call(toolInput, 'trigger_url')

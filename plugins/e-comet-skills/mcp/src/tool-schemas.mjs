@@ -969,6 +969,13 @@ const hookOnlyFeedbackField = (description) => ({
         `${description.description} Injected by the trusted Claude or Codex host hook immediately before this local tool call; ` +
         'model-authored arguments must omit it and every snake_case alias.',
 });
+// The upload grant: in Cowork no hook can change the device call, so the model copies it from report_issue there.
+const grantFeedbackField = (description) => ({
+    ...description,
+    description:
+        `${description.description} Injected by the trusted Claude Code or Codex host hook immediately before this local tool call, and ` +
+        'model-authored arguments omit it, except for an mcp__remote-devices__ tool, which copies it from report_issue and the prepared result.',
+});
 // Preserve authored report text: the STDIO message limit and trusted prepare hook enforce
 // MAX_MCP_MESSAGE_BYTES before rendering. The archive budget also includes the transcript;
 // it is not a replacement per-field allowance for model-authored summary/details.
@@ -988,12 +995,13 @@ const feedbackPrepareSchema = object(
 const feedbackSubmitSchema = object(
     {
         artifactId: feedbackArtifactIdSchema,
-        uploadUrl: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 8192, description: 'Signed HTTPS upload URL.' }),
-        requiredHeaders: hookOnlyFeedbackField({ type: 'object', properties: {}, additionalProperties: { type: 'string', maxLength: 8192 }, description: 'Signed required request headers.' }),
-        objectKey: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 1024, description: 'Storage object key.' }),
-        expiresAt: hookOnlyFeedbackField({ type: 'integer', minimum: 1, description: 'Upload grant expiry timestamp.' }),
-        expectedSize: hookOnlyFeedbackField({ type: 'integer', minimum: 1, maximum: FEEDBACK_MAX_BYTES, description: 'Expected archive size in bytes.' }),
-        expectedSha256: hookOnlyFeedbackField({ ...feedbackSha256, description: 'Expected archive SHA-256.' }),
+        uploadUrl: grantFeedbackField({ type: 'string', minLength: 1, maxLength: 8192, description: 'Signed HTTPS upload URL.' }),
+        requiredHeaders: grantFeedbackField({ type: 'object', properties: {}, additionalProperties: { type: 'string', maxLength: 8192 }, description: 'Signed required request headers.' }),
+        objectKey: grantFeedbackField({ type: 'string', minLength: 1, maxLength: 1024, description: 'Storage object key.' }),
+        expiresAt: grantFeedbackField({ oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$' }],
+            description: 'Upload grant expiry: Unix seconds, or report_issue expires_at as an ISO UTC time.' }),
+        expectedSize: grantFeedbackField({ type: 'integer', minimum: 1, maximum: FEEDBACK_MAX_BYTES, description: 'Expected archive size in bytes.' }),
+        expectedSha256: grantFeedbackField({ ...feedbackSha256, description: 'Expected archive SHA-256.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'Local feedback handoff signature injected by the trusted host hook.' }),
         feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
         feedbackCloud: hookOnlyFeedbackField({ ...feedbackCloudTransportSchema, description: 'Cloud submission marker injected by the trusted cloud hook, which uploads the archive itself.' }),
@@ -1018,6 +1026,7 @@ const feedbackErrorSchema = objectUnion(
     feedbackErrorObject({ code: { const: 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE' }, message: feedbackMessage, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'ARTIFACT_UNAVAILABLE' }, message: feedbackMessage, stage: { const: 'artifact' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'UPLOAD_GRANT_INVALID' }, message: feedbackMessage, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
+    feedbackErrorObject({ code: { const: 'UPLOAD_DESTINATION_REFUSED' }, message: feedbackMessage, stage: { const: 'grant' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'UPLOAD_REJECTED' }, message: feedbackMessage, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
     feedbackErrorObject({ code: { const: 'UPLOAD_UNCERTAIN' }, message: feedbackMessage, stage: { const: 'upload' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable'])
 );

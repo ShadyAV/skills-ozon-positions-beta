@@ -178,7 +178,7 @@ export const tools = [
         description:
             'Upload one prepared e-Comet feedback archive only after remote report_issue returns the trusted upload grant. Before the first feedback tool, call describe_e_comet_tool({name:"submit_e_comet_feedback"}) once and follow the returned complete contract; do not insert it between successful prepare, report_issue, and submit stages. ' +
             'Preserve the explicit report consent and resolved history choice and the order prepare_e_comet_feedback, report_issue, then submit_e_comet_feedback. ' +
-            'Model-authored input must omit every hook-only transport, claim, and cloud field and alias; provide only artifactId. ' +
+            'Model-authored input must omit every hook-only transport, claim, and cloud field and alias; provide only artifactId, except for an mcp__remote-devices__ tool, which also gets the report_issue grant fields the contract names. ' +
             'Never automatically retry an uncertain upload or restart the flow; preserve explicit authorization.',
         inputSchema: toolInputSchemas.submit_e_comet_feedback,
         outputSchema: toolOutputSchemas.submit_e_comet_feedback,

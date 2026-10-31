@@ -23,30 +23,6 @@
             "statusMessage": "Securing e-Comet feedback authorization"
           }
         ]
-      },
-      {
-        "matcher": "^mcp__remote-devices__plugin_e-comet-skills_e-comet-local__(?:prepare_e_comet_feedback|submit_e_comet_feedback)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/feedback-handoff.mjs\"",
-            "timeout": 150,
-            "statusMessage": "Processing e-Comet cloud feedback"
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "^mcp__remote-devices__plugin_e-comet-skills_e-comet-local__prepare_e_comet_feedback$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/feedback-handoff.mjs\"",
-            "timeout": 10,
-            "statusMessage": "Checking e-Comet preparation failure"
-          }
-        ]
       }
     ],
     "PreToolUse": [
@@ -80,17 +56,6 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/feedback-handoff.mjs\"",
             "timeout": 10,
             "statusMessage": "Restoring e-Comet feedback authorization"
-          }
-        ]
-      },
-      {
-        "matcher": "^mcp__remote-devices__plugin_e-comet-skills_e-comet-local__(?:prepare_e_comet_feedback|submit_e_comet_feedback)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/feedback-handoff.mjs\"",
-            "timeout": 150,
-            "statusMessage": "Processing e-Comet cloud feedback"
           }
         ]
       }

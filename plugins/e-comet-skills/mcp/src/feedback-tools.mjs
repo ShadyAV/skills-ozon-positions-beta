@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { isUtf8 } from 'node:buffer';
 import { lstat, open } from 'node:fs/promises';
 
-import { BRIDGE_VERSION, FEEDBACK_EXTENSION_LOG_MAX_BYTES, FEEDBACK_MAX_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH } from './config.mjs';
+import { BRIDGE_VERSION, FEEDBACK_EXTENSION_LOG_MAX_BYTES, FEEDBACK_MAX_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH, FEEDBACK_UPLOAD_DESTINATIONS } from './config.mjs';
 import { collectFeedbackExtensionLog } from './feedback-device-evidence.mjs';
 import { assertHookFields, loadHookSecret, verifyHookSignature } from './hook-signature.mjs';
 import { feedbackArtifactStorageUnavailable, loadVerifiedFeedbackArtifact, registerFeedbackArtifact, retireFeedbackArtifact } from './feedback-artifact-store.mjs';
@@ -10,7 +10,7 @@ import { serializeFeedbackMetadata } from './feedback-metadata.mjs';
 import { foldFeedbackLineEndings, redactFeedbackText, renderFeedbackReport } from './feedback-report.mjs';
 import { extractFeedbackToolCalls } from './feedback-tool-calls.mjs';
 import { createFeedbackZip, feedbackZipFramingBytes } from './feedback-zip.mjs';
-import { putFeedbackArchive } from './feedback-upload.mjs';
+import { assertUploadDestination, putFeedbackArchive } from './feedback-upload.mjs';
 import { FeedbackPreparationError, feedbackSubmissionFailure } from './feedback-errors.mjs';
 import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
 import { diagnosticCheck } from './diagnostic-facts.mjs';
@@ -181,16 +181,20 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         throw new TypeError('Feedback preparation dependencies are invalid');
     }
     const { kind, summary, details, includeTranscript, transcriptPath, feedbackClaim, feedbackSession } = input;
-    if (feedbackClaim === undefined && feedbackSession === undefined && transcriptPath === undefined) {
-        throw hookHandoffUnavailable();
-    }
-    const hookFields = transcriptPath === undefined ? {} : { transcriptPath };
-    try {
-        // WHY: hook fields are only data until this process verifies the trusted signature over them.
-        // Verifying first prevents a skipped or untrusted hook from reaching a transcript or artifact write.
-        await verifySignature({ tool: 'prepare_e_comet_feedback', sessionHash: feedbackSession, signature: feedbackClaim, fields: hookFields });
-    } catch (error) {
-        throw claimInvalid(error);
+    // WHY: a host whose hook cannot change this call (Cowork since 2026-10-30) calls it unsigned. Such a report
+    // never carries history: only a signed hook may name a transcript path, so a model cannot point this process at a
+    // file. Accepted residual "Cowork reports go unsigned and without history".
+    const signed = feedbackClaim !== undefined || feedbackSession !== undefined || transcriptPath !== undefined;
+    if (!signed && includeTranscript === true) throw hookHandoffUnavailable();
+    if (signed) {
+        const hookFields = transcriptPath === undefined ? {} : { transcriptPath };
+        try {
+            // WHY: hook fields are only data until this process verifies the trusted signature over them.
+            // Verifying first prevents a skipped or untrusted hook from reaching a transcript or artifact write.
+            await verifySignature({ tool: 'prepare_e_comet_feedback', sessionHash: feedbackSession, signature: feedbackClaim, fields: hookFields });
+        } catch (error) {
+            throw claimInvalid(error);
+        }
     }
     // The extension's own log for extension-log.json, read alongside the status within the evidence deadline, or
     // carried from the device's inert answer by the cloud hook. Raw log text never enters the result below.
@@ -336,9 +340,10 @@ const uploadFailure = (artifactId, code, error = undefined, operation = 'upload'
  * @param {{ loadArtifact?: typeof loadVerifiedFeedbackArtifact, retireArtifact?: typeof retireFeedbackArtifact, upload?: typeof putFeedbackArchive, now?: () => number, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown }} dependencies
  */
 const submitFeedback = async (input = {}, dependencies = {}) => {
-    const { loadArtifact = loadVerifiedFeedbackArtifact, retireArtifact = retireFeedbackArtifact, upload = putFeedbackArchive, now = Date.now, verifySignature = verifyHookFields } = dependencies;
+    const { loadArtifact = loadVerifiedFeedbackArtifact, retireArtifact = retireFeedbackArtifact, upload = putFeedbackArchive, now = Date.now, verifySignature = verifyHookFields,
+        destinations = FEEDBACK_UPLOAD_DESTINATIONS } = dependencies;
     const artifactId = safeArtifactId(input.artifactId);
-    if (typeof loadArtifact !== 'function' || typeof retireArtifact !== 'function' || typeof upload !== 'function' || typeof now !== 'function' || typeof verifySignature !== 'function') {
+    if (typeof loadArtifact !== 'function' || typeof retireArtifact !== 'function' || typeof upload !== 'function' || typeof now !== 'function' || typeof verifySignature !== 'function' || !Array.isArray(destinations)) {
         throw new TypeError('Feedback submission dependencies are invalid.');
     }
     if (
@@ -354,22 +359,34 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
     ) {
         return submitError(artifactId, 'failed', 'FEEDBACK_HOOK_HANDOFF_UNAVAILABLE', 'The trusted e-Comet hook handoff is unavailable.', 'handoff', false, undefined, 'handoff_submit');
     }
-    // Native authority is a signature. The cloud hook staged the grant itself and passes its own verifier.
-    const hookFields = {
-        artifactId: input.artifactId,
-        uploadUrl: input.uploadUrl,
-        requiredHeaders: input.requiredHeaders,
-        objectKey: input.objectKey,
-        expiresAt: input.expiresAt,
-        expectedSize: input.expectedSize,
-        expectedSha256: input.expectedSha256,
-    };
-    try {
-        // WHY: verify before artifact reads or request creation so raw transport values never confer
-        // authority. The signature covers this artifactId, so a swapped one cannot reuse another grant.
-        await verifySignature({ tool: 'submit_e_comet_feedback', sessionHash: input.feedbackSession, signature: input.feedbackClaim, fields: hookFields });
-    } catch (error) {
-        return submitError(artifactId, 'failed', 'UPLOAD_GRANT_INVALID', 'The trusted feedback handoff claim could not be verified.', 'grant', false, error, 'claim_verification');
+    // Native authority is a signature. A grant the model copied (Cowork, whose hook cannot change this call) has
+    // none, so only e-Comet's own storage may receive it: accepted residual "Cowork reports go unsigned and without
+    // history". The model copies report_issue's expires_at as it came, an ISO time or epoch seconds.
+    const signed = input.feedbackClaim !== undefined || input.feedbackSession !== undefined;
+    const expiresAt = !signed && typeof input.expiresAt === 'string' ? Math.floor(Date.parse(input.expiresAt) / 1000) : input.expiresAt;
+    if (signed) {
+        const hookFields = {
+            artifactId: input.artifactId,
+            uploadUrl: input.uploadUrl,
+            requiredHeaders: input.requiredHeaders,
+            objectKey: input.objectKey,
+            expiresAt: input.expiresAt,
+            expectedSize: input.expectedSize,
+            expectedSha256: input.expectedSha256,
+        };
+        try {
+            // WHY: verify before artifact reads or request creation so raw transport values never confer
+            // authority. The signature covers this artifactId, so a swapped one cannot reuse another grant.
+            await verifySignature({ tool: 'submit_e_comet_feedback', sessionHash: input.feedbackSession, signature: input.feedbackClaim, fields: hookFields });
+        } catch (error) {
+            return submitError(artifactId, 'failed', 'UPLOAD_GRANT_INVALID', 'The trusted feedback handoff claim could not be verified.', 'grant', false, error, 'claim_verification');
+        }
+    } else {
+        try {
+            assertUploadDestination(input.uploadUrl, destinations, input.requiredHeaders ?? {});
+        } catch (error) {
+            return submitError(artifactId, 'failed', 'UPLOAD_DESTINATION_REFUSED', 'The feedback upload destination is not an e-Comet storage location.', 'grant', false, error, 'grant_validation');
+        }
     }
     if (
         artifactId === undefined ||
@@ -378,8 +395,8 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
         typeof input.requiredHeaders !== 'object' ||
         Array.isArray(input.requiredHeaders) ||
         typeof input.objectKey !== 'string' ||
-        !Number.isSafeInteger(input.expiresAt) ||
-        input.expiresAt * 1000 <= now() ||
+        !Number.isSafeInteger(expiresAt) ||
+        expiresAt * 1000 <= now() ||
         !Number.isSafeInteger(input.expectedSize) ||
         input.expectedSize <= 0 ||
         typeof input.expectedSha256 !== 'string' ||
@@ -400,7 +417,7 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
         await upload({
             uploadUrl: input.uploadUrl,
             requiredHeaders: input.requiredHeaders,
-            expiresAt: input.expiresAt,
+            expiresAt,
             bytes: artifact.bytes,
         });
     } catch (error) {

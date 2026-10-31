@@ -2,7 +2,7 @@ import { request as httpsRequest } from 'node:https';
 import { validateHeaderValue } from 'node:http';
 import { recordFeedbackHttpStatus, withFeedbackOperation } from './feedback-diagnostics.mjs';
 
-import { FEEDBACK_MAX_BYTES } from './config.mjs';
+import { FEEDBACK_MAX_BYTES, FEEDBACK_UPLOAD_DESTINATIONS } from './config.mjs';
 
 const MAX_UPLOAD_URL_BYTES = 8 * 1024;
 const MAX_REQUIRED_HEADERS = 32;
@@ -28,6 +28,38 @@ const rejected = (status) => {
 };
 const uncertain = (cause = undefined) => new FeedbackUploadError('UPLOAD_UNCERTAIN', 'The feedback archive upload outcome is uncertain.', cause);
 const timeout = () => Object.assign(new Error('Feedback upload deadline elapsed.'), { code: 'ETIMEDOUT', feedbackReason: 'network_timeout' });
+const destinationRefused = (cause = undefined) => Object.assign(
+    new FeedbackUploadError('UPLOAD_DESTINATION_REFUSED', 'The feedback upload destination is not an e-Comet storage location.', cause),
+    { feedbackReason: 'destination_refused' },
+);
+
+/**
+ * Pins a signed upload URL to e-Comet storage. Exact hostname, default port, https, no credentials, no fragment,
+ * and a path that starts with an allowed bucket prefix. WHATWG URL parsing collapses dot segments for https,
+ * percent-encoded ones (`%2e`, `%2E`) included, but it decodes nothing else: an escaped separator such as `%2f`
+ * stays inside its segment here and becomes one only where the storage service itself decodes it. So this test is
+ * not a general proof that a path stays below its prefix. It is sufficient here only because every allowed prefix
+ * is bucket-level — the bucket segment of S3 path style, behind the storage proxy's fixed `/storage` mount, which
+ * forwards the raw request path rather than a decoded one — so whatever follows, an accepted URL still addresses
+ * the pinned bucket. A deeper prefix would need the escaped separators resolved the way the service resolves them.
+ * @param {string} uploadUrl
+ * @param {ReadonlyArray<{ hostname: string, pathPrefix: string }>} destinations
+ * @param {Record<string, string>} requiredHeaders
+ * @returns {URL}
+ */
+export const assertUploadDestination = (uploadUrl, destinations = FEEDBACK_UPLOAD_DESTINATIONS, requiredHeaders = {}) => {
+    let target;
+    try { target = new URL(uploadUrl); } catch (error) { throw destinationRefused(error); }
+    if (target.protocol !== 'https:' || target.port !== '' || target.username || target.password || target.hash) throw destinationRefused();
+    const allowed = destinations.some(({ hostname, pathPrefix }) => target.hostname === hostname && target.pathname.startsWith(pathPrefix));
+    if (!allowed) throw destinationRefused();
+    // S3 virtual-host addressing selects the bucket from Host, even when the connection URL is pinned.
+    // A grant no hook signed must not replace that authority through its required headers.
+    if (Object.entries(requiredHeaders).some(([name, value]) => name.toLowerCase() === 'host' && value.toLowerCase() !== target.host)) {
+        throw destinationRefused();
+    }
+    return target;
+};
 
 /** @param {{ uploadUrl?: string, requiredHeaders?: Record<string, string>, expiresAt?: number, bytes?: Buffer }} grant @param {() => number} now */
 const assertGrant = ({ uploadUrl, requiredHeaders, expiresAt, bytes }, now, maxBytes) => {

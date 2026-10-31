@@ -87,6 +87,9 @@ const eventNameFromEvent = (event) => event.hook_event_name ?? event.hookEventNa
 const toolNameFromEvent = (event) => event.tool_name ?? event.toolName;
 const toolInputFromEvent = (event) => event.tool_input ?? event.toolInput;
 const toolResponseFromEvent = (event) => event.tool_response ?? event.toolResponse;
+// Claude Code names a call it serves to a cloud session (Cowork) `served:<caller>`. No hook can change such a
+// session's device calls, so the model copies the upload grant there and nothing is staged.
+const servedCall = (event) => String(event?.session_id ?? event?.sessionId ?? '').startsWith('served:');
 
 const hashSessionId = (sessionId) =>
     createHash('sha256').update(validateSessionId(sessionId), 'utf8').digest('hex');
@@ -1099,7 +1102,7 @@ const processHookEventAuthoritative = async (event, _options = {}, observed = {}
         // A failed authorization already carries the only fact that matters here, and the service
         // issues very few of them per hour: replacing an exhausted-limit error with a handoff outcome
         // would hide why the report cannot be sent. Nothing is staged for a result that granted nothing.
-        if (isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true) {
+        if (isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true || servedCall(event)) {
             return { exitCode: 0, stdout: '', stderr: '' };
         }
         let cloudDirectory;
@@ -1290,7 +1293,7 @@ export const processHookEvent = async (event, options = {}) => {
             : REMOTE_REPORT_ISSUE_TOOL.test(toolName) ? 'feedback_authorization' : undefined;
     const routedLocal = cloud || LOCAL_FEEDBACK_TOOL.test(toolName);
     const routedRemote = eventName === 'PostToolUse' && REMOTE_REPORT_ISSUE_TOOL.test(toolName);
-    if (!family || result.exitCode !== 0 || (!routedRemote && !routedLocal)
+    if (!family || result.exitCode !== 0 || (!routedRemote && !routedLocal) || (routedRemote && servedCall(event))
         || !['PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(eventName)) return result;
     if (eventName === 'PostToolUse' && family === 'feedback_prepare'
         && isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true) return result;

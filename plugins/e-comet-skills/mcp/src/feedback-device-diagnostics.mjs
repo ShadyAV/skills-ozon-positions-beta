@@ -5,13 +5,8 @@ import { validateSchemaValue } from './schema-validation.mjs';
 
 const STATES = new Set(['passed', 'failed', 'unknown', 'not_checked', 'unsupported']);
 const MAX_TEXT_LENGTH = 128;
-// The cloud hook validates the device projection before it can enter an archive; these caps bound that
-// untrusted input. The full projection with every evidence check measured about 6 KiB, so both keep
-// twofold headroom without admitting an unbounded placeholder. The margin is measured, not enforced on
-// the device: see the accepted residual "Device projection caps are a measured margin, not an enforced
-// one" in docs/local-agent-architecture.md#accepted-residuals before reporting the gate again.
-export const FEEDBACK_DEVICE_DIAGNOSTICS_MAX_BYTES = 12 * 1024;
-export const FEEDBACK_DEVICE_SNAPSHOT_MAX_BYTES = 16 * 1024;
+// The full projection with every evidence check measured about 6 KiB; the report keeps it within twice that and more.
+const FEEDBACK_DEVICE_SNAPSHOT_MAX_BYTES = 16 * 1024;
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = value => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= MAX_TEXT_LENGTH
@@ -105,14 +100,6 @@ const specs = {
         causes: ['permission_denied', 'io_error', 'directory_absent', 'corrupt', 'unavailable', 'unknown'], facts: exactFacts(extensionLogFactsSchema), strict: true },
 };
 
-export const feedbackDeviceDiagnosticsFailure = (error, now = Date.now) => ({
-    bridgeStatusCollection: {
-        check: 'bridge_status_collection', state: 'failed', observedAt: new Date(now()).toISOString(),
-        source: 'feedback_preparation', executionPlane: 'device',
-        cause: ['EACCES', 'EPERM'].includes(error?.code) ? 'permission_denied' : 'unknown',
-    },
-});
-
 const selectCheck = (slot, value) => {
     const spec = specs[slot];
     if (!spec || !record(value) || value.check !== spec.check || !STATES.has(value.state)
@@ -170,7 +157,7 @@ const selectTransportEvents = value => {
 const selectBridgeFailure = value => (record(value) && bridgeIdentifier(value.name) && (value.code === null || value.code === undefined || bridgeIdentifier(value.code))
     ? { name: value.name, code: value.code ?? null } : undefined);
 const selectBridge = value => {
-    // The already projected form is re-validated as it is, so the cloud half can accept what the device sent.
+    // The already projected form is re-validated as it is, so projecting a projection changes nothing.
     if (record(value.bridge)) return validateSchemaValue(value.bridge, bridgeBlockSchema) ? value.bridge : undefined;
     if (!BRIDGE_STATUS_CODES.includes(value.code)) return undefined;
     const registration = record(value.registration) ? value.registration : {};
@@ -235,8 +222,7 @@ export const selectFeedbackDeviceSnapshot = status => {
         extension: extension && Object.keys(extension).length ? extension : undefined,
         browserContext, storage: selectStorage(status.storage), diagnostics: selectFeedbackDeviceDiagnostics(status.diagnostics),
     });
-    // The ring yields to the rest: its oldest events leave until the whole snapshot fits the 16 KiB the cloud half
-    // enforces all or nothing.
+    // The ring yields to the rest: its oldest events leave until the whole snapshot fits its 16 KiB.
     while (snapshot.transportEvents && Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > FEEDBACK_DEVICE_SNAPSHOT_MAX_BYTES) {
         snapshot.transportEvents = snapshot.transportEvents.slice(1);
         if (snapshot.transportEvents.length === 0) delete snapshot.transportEvents;
@@ -244,67 +230,9 @@ export const selectFeedbackDeviceSnapshot = status => {
     return snapshot;
 };
 
-export const isValidFeedbackDeviceSnapshot = value => {
-    if (!record(value)) return false;
-    const selected = selectFeedbackDeviceSnapshot(value);
-    if (!isValidFeedbackDeviceDiagnostics(value.diagnostics)) return false;
-    if (value.extension !== undefined && (!record(value.extension) || value.extension.state === undefined || value.extension.route === undefined)) return false;
-    if (value.storage !== undefined && (!record(value.storage) || !['results', 'marketplaceArtifacts', 'feedbackArtifacts'].every(key => Object.hasOwn(value.storage, key)))) return false;
-    return Object.keys(selected).length > 0 && exact(value, selected) && Buffer.byteLength(JSON.stringify(value), 'utf8') <= FEEDBACK_DEVICE_SNAPSHOT_MAX_BYTES;
-};
-
-const exact = (left, right) => {
-    if (left === right) return true;
-    if (Array.isArray(left) || Array.isArray(right)) {
-        return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => exact(item, right[index]));
-    }
-    if (!record(left) || !record(right)) return false;
-    const leftKeys = Object.keys(left); const rightKeys = Object.keys(right);
-    return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(right, key) && exact(left[key], right[key]));
-};
-
-export const isValidFeedbackDeviceDiagnostics = value => {
-    const selected = selectFeedbackDeviceDiagnostics(value);
-    return selected !== undefined && exact(value, selected) && Buffer.byteLength(JSON.stringify(value), 'utf8') <= FEEDBACK_DEVICE_DIAGNOSTICS_MAX_BYTES;
-};
-
-const diagnosticString = { type: 'string', minLength: 1, maxLength: MAX_TEXT_LENGTH };
 const diagnosticTimestamp = { type: 'string', minLength: 24, maxLength: 24, pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' };
 const nonNegativeIntegerSchema = { type: 'integer', minimum: 0 };
 const diagnosticObject = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false });
-const checkSchema = (check, sources, planes, facts, causes) => diagnosticObject({
-    check: { const: check }, state: { type: 'string', enum: [...STATES] }, observedAt: diagnosticTimestamp,
-    source: { type: 'string', enum: sources }, executionPlane: { type: 'string', enum: planes },
-    ...(facts ? { facts } : {}), cause: { type: 'string', enum: causes },
-}, ['check', 'state', 'observedAt', 'source', 'executionPlane']);
-const storageTargetSchema = { type: 'object', oneOf: [
-    diagnosticObject({ state: { const: 'ready' }, backend: { type: 'string', enum: ['plugin_data', 'application_data', 'override'] } }, ['state', 'backend']),
-    diagnosticObject({ state: { const: 'unavailable' }, reason: { type: 'string', enum: ['plugin_data_missing', 'plugin_data_invalid', 'plugin_data_conflict', 'application_data_invalid', 'override_invalid'] } }, ['state', 'reason']),
-] };
-const packageMetadataSchema = name => diagnosticObject({ name: { const: name }, version: diagnosticString }, ['name', 'version']);
-export const feedbackDeviceDiagnosticsSchema = diagnosticObject({
-    bridgeStatusCollection: checkSchema('bridge_status_collection', ['feedback_preparation'], ['device'], undefined, ['permission_denied', 'unknown']),
-    snapshot: checkSchema('snapshot', ['local_bridge_status'], ['device'], undefined, ['unknown']),
-    runtime: checkSchema('runtime', ['node_process'], ['device'], diagnosticObject({ nodeVersion: diagnosticString, platform: diagnosticString,
-        arch: diagnosticString, bridgeVersion: diagnosticString, mcpProtocolVersion: diagnosticString, osRelease: { type: 'string', pattern: '^[0-9A-Za-z._+-]{1,64}$' } },
-    ['nodeVersion', 'platform', 'arch', 'bridgeVersion']), ['unknown']),
-    client: checkSchema('client', ['mcp_initialize'], ['client'], diagnosticObject({ name: diagnosticString, version: diagnosticString, provenance: { const: 'client_reported' },
-        hostRuntimeVersion: diagnosticString, hostLastFailure: { type: 'string', enum: [...HOST_LAST_FAILURES] }, hostRestarts: nonNegativeIntegerSchema }, ['provenance']), ['unknown']),
-    routeFreshness: checkSchema('route_freshness', ['extension_heartbeat'], ['device'], diagnosticObject({ lastObservedAt: diagnosticTimestamp }, ['lastObservedAt']), ['unknown']),
-    storage: checkSchema('storage', ['resolved_configuration'], ['device'], diagnosticObject({ scope: { const: 'configuration' },
-        targets: diagnosticObject({ results: storageTargetSchema, marketplaceArtifacts: storageTargetSchema, feedbackArtifacts: storageTargetSchema }, []) }, ['scope', 'targets']), ['unknown']),
-    extensionSnapshot: checkSchema('extension_snapshot', ['extension', 'capability_negotiation', 'device_process'], ['device'], extensionSnapshotFactsSchema, ['unsupported', 'unavailable', 'corrupt', 'unknown']),
-    packageLayout: checkSchema('package_layout', ['module_location'], ['device'], diagnosticObject({ layout: { type: 'string', enum: LAYOUTS } }, ['layout']), ['unknown']),
-    packageMetadata: checkSchema('package_metadata', ['package_metadata'], ['device'], packageMetadataSchema('@e-comet/local-mcp'), ['missing', 'corrupt', 'io_error']),
-    codexManifest: checkSchema('codex_manifest', ['package_metadata'], ['device'], packageMetadataSchema('e-comet-skills'), ['missing', 'corrupt', 'io_error']),
-    mcpConfiguration: checkSchema('mcp_configuration', ['package_metadata'], ['device'],
-        diagnosticObject(Object.fromEntries(Object.entries(MCP_CONFIGURATION).map(([key, value]) => [key, { const: value }])), Object.keys(MCP_CONFIGURATION)), ['missing', 'corrupt', 'io_error']),
-    entrypoint: checkSchema('entrypoint', ['filesystem_metadata'], ['device'], undefined, ['missing', 'io_error']),
-    extensionInstall: checkSchema('extension_install', ['browser_profile_metadata'], ['device'], extensionInstallFactsSchema, ['permission_denied', 'io_error', 'directory_absent', 'unknown']),
-    hookPermissions: checkSchema('hook_permissions', ['codex_hooks_list', 'device_process'], ['device'], hookPermissionsFactsSchema, ['permission_denied', 'missing', 'unavailable', 'unsupported', 'unknown']),
-    extensionLog: checkSchema('extension_log', ['browser_profile_storage'], ['device'], extensionLogFactsSchema, ['permission_denied', 'io_error', 'directory_absent', 'corrupt', 'unavailable', 'unknown']),
-}, []);
-
 const versionSchema = { type: 'string', pattern: EXTENSION_INSTALL_VOCABULARY.version.source };
 const bridgeFailureSchema = diagnosticObject({ name: { type: 'string', pattern: BRIDGE_IDENTIFIER.source }, code: { oneOf: [{ type: 'string', pattern: BRIDGE_IDENTIFIER.source }, { type: 'null' }] } }, ['name', 'code']);
 const policyBrowsersSchema = { type: 'array', items: { type: 'string', enum: [...EXTENSION_INSTALL_VOCABULARY.browsers] }, uniqueItems: true, maxItems: EXTENSION_INSTALL_VOCABULARY.browsers.length };
@@ -327,21 +255,3 @@ const bridgeBlockSchema = diagnosticObject({
     extensionVersion: versionSchema,
     lastFailureRecordAt: diagnosticTimestamp,
 }, ['code', 'brokerCount', 'browsers', 'userLevelHostsDisabled', 'nativeHostBlocked', 'lastFailureRecord']);
-const transportEventsSchema = { type: 'array', minItems: 1, maxItems: MAX_TRANSPORT_EVENTS, items: diagnosticObject({ at: diagnosticTimestamp,
-    kind: { type: 'string', enum: [...TRANSPORT_EVENT_KINDS] }, code: { type: 'string', pattern: BRIDGE_IDENTIFIER.source } }, ['at', 'kind', 'code']) };
-
-export const feedbackDeviceSnapshotSchema = diagnosticObject({
-    bridgeStatusCollection: feedbackDeviceDiagnosticsSchema.properties.bridgeStatusCollection,
-    bridgeVersion: diagnosticString,
-    extensionProtocolVersion: { type: 'integer', minimum: 1 },
-    state: { type: 'string', enum: [...bridgeStates] },
-    bridge: bridgeBlockSchema,
-    transportEvents: transportEventsSchema,
-    extension: diagnosticObject({ state: { type: 'string', enum: ['never_connected', 'connected', 'disconnected'] }, route: { type: 'string', enum: ['direct', 'none'] },
-        version: diagnosticString, lastConnectedAt: diagnosticTimestamp, lastDisconnectedAt: diagnosticTimestamp,
-        ozonSellerPromotionReportSupported: { type: 'boolean' }, ozonSellerPromotionReportsSupported: { type: 'boolean' }, ozonSellerAnalyticsReportSupported: { type: 'boolean' },
-        ozonSearchPositionsSupported: { type: 'boolean' } }, ['state', 'route']),
-    browserContext: diagnosticObject({ state: { type: 'string', enum: ['unknown', 'known'] }, wbTabConnected: { type: 'boolean' }, sellerTabConnected: { type: 'boolean' }, changedAt: diagnosticTimestamp }, ['state']),
-    storage: diagnosticObject({ results: storageTargetSchema, marketplaceArtifacts: storageTargetSchema, feedbackArtifacts: storageTargetSchema }, []),
-    diagnostics: feedbackDeviceDiagnosticsSchema,
-}, []);

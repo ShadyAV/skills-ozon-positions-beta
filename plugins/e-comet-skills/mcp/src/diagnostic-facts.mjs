@@ -69,7 +69,7 @@ const enumeration = (values) => ({ type: 'string', enum: [...values] });
 export const HOOK_PERMISSIONS_VOCABULARY = Object.freeze({
     events: Object.freeze(['preToolUse', 'postToolUse', 'postToolUseFailure', 'unknown']),
     families: Object.freeze(['browser_authorization_restore', 'browser_authorization_capture', 'update_check', 'feedback_authorization_restore',
-        'feedback_authorization_capture', 'feedback_cloud_processing', 'feedback_failure_recovery', 'plugin_hook']),
+        'feedback_authorization_capture', 'plugin_hook']),
     trust: Object.freeze(['trusted', 'untrusted', 'modified', 'managed', 'unknown']),
     trustCounters: Object.freeze(['trusted', 'untrusted', 'modified', 'managed']),
     statuses: Object.freeze(['ready', 'disabled', 'review_required', 'missing', 'incomplete_inventory', 'unsupported']),

@@ -197,10 +197,9 @@ not that a hook ran in the current task. Successful `facts.hooks[]` contains onl
 state, and trust status; commands, paths, hashes, raw warnings and errors, and unrelated hooks are not returned.
 `installationMatch` and `currentApplicationMatch` remain `not_verified`: reading local configuration does not identify
 the installed package copy or the application that owns the current task.
-`status:"ready"` requires the seven Codex-supported e-Comet handlers to be present exactly once, enabled, and trusted
-or managed. `disabled` and `review_required` are separate failures; missing, partial, duplicate, and unknown inventories
-do not pass. Codex currently omits the packaged `PostToolUseFailure` handler because this native host version does not
-support that event. If the inspector cannot return a snapshot, the check is `not_checked` and inventory fields are omitted.
+`status:"ready"` requires the five e-Comet handlers to be present exactly once, enabled, and trusted or managed.
+`disabled` and `review_required` are separate failures; missing, partial, duplicate, and unknown inventories do not
+pass. If the inspector cannot return a snapshot, the check is `not_checked` and inventory fields are omitted.
 When the device stops waiting on its own inspector instead, the check is `unknown` with cause `unavailable` and source
 `device_process`, the same way an abandoned snapshot request is recorded: our own deadline is never a Codex fault.
 Its separate `configuration_probe` facts contain only `status:"failed"` and a closed failure `{reason,phase}`: reason is
@@ -350,8 +349,8 @@ that a host delivered to its model. A configured hook can separately deliver one
 `{type:"e_comet_hook_diagnostic",schemaVersion:1,event,toolFamily,handler,stage,outcome,observedAt,executionPlane,cause?,systemCode?,handlerVersion?}`
 record in `hookSpecificOutput.additionalContext`. Closed values are: event `PreToolUse`, `PostToolUse`, or
 `PostToolUseFailure`; toolFamily `browser_job`, `feedback_prepare`, `feedback_authorization`, or `feedback_submit`;
-handler `browser_job_handoff`, `feedback_handoff`, or `feedback_cloud`; stage `handoff_staged`, `input_rewritten`,
-`call_denied`, `result_observed`, or `result_replaced`; outcome `succeeded`, `denied`, `failed`, or `uncertain`; and
+handler `browser_job_handoff` or `feedback_handoff`; stage `handoff_staged`, `input_rewritten`,
+`call_denied`, or `result_observed`; outcome `succeeded`, `denied`, `failed`, or `uncertain`; and
 executionPlane `native`, `cloud`, or `unknown`. Optional causes are `invalid_event`, `invalid_input`, `invalid_state`,
 `state_missing`, `storage_unavailable`, `permission_denied`, `expired`, `missing`, `ambiguous`, `unsupported`,
 `io_error`, `internal_error`, and `unknown`; optional system codes are `EACCES`, `EPERM`, `EROFS`, `ENOENT`, `ENOSPC`,
@@ -376,7 +375,7 @@ always `forbidden`; missing handoff and insufficient evidence remain `unknown`. 
 top-level `retryable` flag and `operationDiagnostic.retryDisposition`, the `retryDisposition` governs repeats:
 `retryable:true` only says the failure class can clear once its prerequisite is fixed, never that the same call may
 be repeated without a user decision. Receipts never enter
-authorization input, nested errors, cloud-only adapter markers, or cloud-only preparation/finalization results.
+authorization input or nested errors.
 
 For decorated results, the JSON text representation is the same value as `structuredContent`; existing resource links
 remain attached. If receipt construction or decoration fails, the original business result is delivered unchanged.
@@ -397,9 +396,9 @@ bounded name and version the host sent in MCP initialize with `client_reported` 
 Codex runtime, or the DeepSeek adapter (`e-comet-deepseek-harness`, with the plugin package version) plus, under that
 adapter only, `hostRuntimeVersion`: the DeepSeek Harness runtime version the adapter resolved its declared peers against,
 and after a restart `hostLastFailure` and `hostRestarts`. Runtime also keeps `osRelease`.
-The Desktop product version is not available to plugins. This is not a trusted host identity. The report's `## Host` section repeats it next to the preparation `route`,
-`native` for the device dispatcher and `cloud` for the Cowork hook, which is what tells a Cowork archive from a Claude
-Code archive prepared on the same device.
+The Desktop product version is not available to plugins. This is not a trusted host identity. The report's `## Host` section repeats it next to the preparation `route`:
+`native` when a trusted hook signed the preparation, `unsigned` when none could (Cowork, whose host refuses a device call
+a hook changed). That line is what tells a Cowork archive from a Claude Code archive prepared on the same device.
 
 Preparation additionally collects, in parallel, one read-only `extension_snapshot`, recorded as `not_checked` with
 cause `unavailable` without any request when no extension route is connected; the passive installation checks
@@ -415,12 +414,7 @@ probe that throws contributes nothing; one that observes a failure contributes t
 and the snapshot and `hook_permissions` probes record the device's own abandonment rather than vanishing. No probe
 blocks preparation. The remote sign-in and storage-write probes are not collected: `report_issue` is itself a
 remote call, and preparation already writes the archive. Paths, URLs, tokens, free-form errors, arbitrary facts,
-evidence references, suggested next checks, unknown slots, and future properties are excluded. Cowork carries this
-projection, bounded at 16 KiB, in the nonce-bound versioned prepare response and validates the complete response
-before creating the immutable archive. Mixed adapter versions fail closed and require updating the older plugin half
-and starting a fresh cloud task. Submit does not depend on the device version: the cloud hook uploads the archive itself.
-Only the adapter version gates a change to the prepare response or the archive contents, such as the
-`extension-log.json` file below. The adapter version is 5.
+evidence references, suggested next checks, unknown slots, and future properties are excluded.
 
 The report's `bridge` block keeps, beside the cause `code` and the registration and broker facts, the cause's `owner`,
 the `comspec` state of a start failure on Windows, the registration's `runtimeRecheck`, the browsers whose policy read
@@ -433,14 +427,10 @@ cap, within its own 4 KiB: the newest events are kept, and the oldest leave unti
 Every archive may hold `extension-log.json` after `report.md`, `metadata.json` and `transcript.jsonl`: the e-Comet
 extension's own log, read from the same profile the `extension_log` check reads, whether or not the extension is
 connected. With the history included it holds every row; without it, only the native connection rows. Each string
-value of a row passes the report redaction on its own, and a value under a credential name is replaced whole. On the
-device the file keeps the newest rows within 4 MiB in the order the extension stored them; Cowork receives it inside
-the inert prepare response, connection rows first and then the newest other rows, within 12 KiB of text. That
-response carries the file twice, in `structuredContent` and in its text copy, so the device shrinks the file until
-the whole serialized response fits 64 KiB, and leaves it out when none fits. The cloud
-archive drops it whole before it would shorten `report.md` or `metadata.json`. `metadata.json` says what it holds:
-`extensionLog` with `included`, `rows`, `scope` (`all` with the history, `connection` without) and `trimmed` (rows
-were left out to fit a limit; on the Cowork route also when the device cut the file to fit its answer). The file never
+value of a row passes the report redaction on its own, and a value under a credential name is replaced whole.  The file
+keeps the newest rows within 4 MiB in the order the extension stored them, and the archive drops it whole before it
+would shorten `report.md` or `metadata.json`. `metadata.json` says what it holds: `extensionLog` with `included`,
+`rows`, `scope` (`all` with the history, `connection` without) and `trimmed` (rows were left out to fit a limit). The file never
 appears in a tool result: the prepare result names the archive, not its contents.
 
 The report's `## Tool calls` section lists the newest hundred calls of the session in call order, each with the host's

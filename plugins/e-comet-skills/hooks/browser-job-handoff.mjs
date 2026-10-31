@@ -443,6 +443,12 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
             });
             return { exitCode: 0, stdout: '', stderr: '' };
         } catch (error) {
+            // In Claude's cloud sandbox a Cowork device call takes trigger_url from the model, so an error staging it here
+            // must not stop the flow; a cloud session whose local tools claim it gets HANDOFF_MISSING there instead.
+            if (env.CLAUDE_CODE_REMOTE === 'true') {
+                observed.unstaged = true;
+                return { exitCode: 0, stdout: '', stderr: '' };
+            }
             const safeError = safeHookError(error);
             return { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message}${safeError.details ? ` Diagnostics: ${JSON.stringify(safeError.details)}` : ''}` };
         }
@@ -504,8 +510,8 @@ export const processHookEvent = async (event, options = {}) => {
     const toolName = event?.tool_name ?? event?.toolName;
     const isPost = eventName === 'PostToolUse' && REMOTE_BROWSER_JOB_TOOL.test(toolName);
     const isPre = eventName === 'PreToolUse' && LOCAL_BROWSER_TOOL.test(toolName);
-    // A Cowork call that passes untouched has nothing to record: the hook neither rewrote nor denied it.
-    if ((!isPost && !isPre) || result.exitCode !== 0 || (isPre && result.stdout === '')) return result;
+    // A Cowork call that passes untouched, or a cloud token left unstaged, has nothing to record.
+    if ((!isPost && !isPre) || result.exitCode !== 0 || (isPre && result.stdout === '') || observed.unstaged) return result;
     let decision;
     if (result.stdout) {
         try { decision = JSON.parse(result.stdout).hookSpecificOutput?.permissionDecision; }

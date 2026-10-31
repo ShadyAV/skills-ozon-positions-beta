@@ -6,8 +6,6 @@ import {
     BRIDGE_VERSION,
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
-    FEEDBACK_CLOUD_ANSWER_MAX_BYTES,
-    FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES,
     IMAGE_CONCURRENCY,
     LATEST_MCP_PROTOCOL_VERSION,
     MAX_IMAGE_BASKET,
@@ -19,9 +17,7 @@ import { createArtifactWriter } from './artifact-store.mjs';
 import { BRIDGE_CODES, bridgeCauseError } from './bridge-cause.mjs';
 import { prepareECometFeedback, submitECometFeedback } from './feedback-tools.mjs';
 import { FeedbackPreparationError, feedbackPreparationFailure, feedbackSubmissionFailure } from './feedback-errors.mjs';
-import { feedbackCloudSubmitPlaceholder, feedbackHostResultUnavailable, hasFeedbackCloudTransport, hasFeedbackHostAdapterMarker, isValidFeedbackHostAdapterInput } from './feedback-host-adapter.mjs';
-import { feedbackDeviceDiagnosticsFailure, selectFeedbackDeviceSnapshot } from './feedback-device-diagnostics.mjs';
-import { collectFeedbackDeviceEvidence, feedbackExtensionLog, readFeedbackExtensionLogRows } from './feedback-device-evidence.mjs';
+import { collectFeedbackDeviceEvidence } from './feedback-device-evidence.mjs';
 import { collectExtensionLog as collectExtensionLogFromDisk, readExtensionLogRows as readExtensionLogRowsFromDisk } from './extension-log.mjs';
 import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
 import { feedbackArtifactIdSchema, feedbackDiagnosticsSchema, validateSchemaValue } from './tool-schemas.mjs';
@@ -309,7 +305,6 @@ export const createMcpMessageHandler = ({
         return Boolean(outcome);
     };
     const sendOperationResult = async (id, toolName, result) => {
-        if (result?.structuredContent?.status === 'host_result_unavailable') return sendResult(id, result);
         let decorated = result;
         try {
             const receipt = operationDiagnostics.record(operationFactsFromResult(toolName, result));
@@ -484,47 +479,13 @@ export const createMcpMessageHandler = ({
     };
 
     const handleFeedbackPrepare = async (id, args = {}) => {
-        if (hasFeedbackHostAdapterMarker(args)) {
-            if (!validateToolArguments('prepare_e_comet_feedback', args).ok || !isValidFeedbackHostAdapterInput('prepare_e_comet_feedback', args)) {
-                sendOperationResult(id, 'prepare_e_comet_feedback', textResult(feedbackPrepareFailure(new FeedbackPreparationError('FEEDBACK_INPUT_INVALID')), true));
-                return;
-            }
-            // The cloud half cannot read this disk: the log for its archive rides in this inert answer, which the cloud
-            // PostToolUse replaces. Accepted residual "Cowork carries a trimmed extension log".
-            const logRows = readFeedbackExtensionLogRows({ readExtensionLogRows: readLogRows });
-            let bridgeStatus;
-            try {
-                bridgeStatus = selectFeedbackDeviceSnapshot(await collectDeviceEvidence());
-                if (!Object.keys(bridgeStatus).length) bridgeStatus = { diagnostics: feedbackDeviceDiagnosticsFailure(undefined) };
-            } catch (error) {
-                bridgeStatus = { diagnostics: feedbackDeviceDiagnosticsFailure(error) };
-            }
-            // The answer carries the log twice (structuredContent and the escaped text copy), so the log gets what the
-            // projection leaves of the serialized message's budget: at most its cap, shrunk in proportion until it fits.
-            const rows = await logRows;
-            const answer = (/** @type {{ text?: string, trimmed?: boolean } | undefined} */ log) => feedbackHostResultUnavailable('prepare_e_comet_feedback', args.feedbackAdapter, bridgeStatus, log);
-            const wireBytes = (/** @type {unknown} */ value) => Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id, result: textResult(value) }), 'utf8');
-            const bare = wireBytes(answer(undefined));
-            let fitted = answer(undefined);
-            for (let maxBytes = FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES, attempt = 0; attempt < 4 && maxBytes > 0; attempt += 1) {
-                const log = feedbackExtensionLog(rows, { includeTranscript: args.includeTranscript === true, maxBytes, connectionFirst: true });
-                if (!log) break;
-                const size = wireBytes(answer(log));
-                if (size <= FEEDBACK_CLOUD_ANSWER_MAX_BYTES) { fitted = answer(log); break; }
-                // Until a smaller cut fits, the answer leaves every row out.
-                fitted = answer({ trimmed: true });
-                maxBytes = Math.floor(maxBytes * (FEEDBACK_CLOUD_ANSWER_MAX_BYTES - bare) / (size - bare)) - 1;
-            }
-            sendResult(id, textResult(fitted));
-            return;
-        }
         if (!validateToolArguments('prepare_e_comet_feedback', args).ok) {
             sendOperationResult(id, 'prepare_e_comet_feedback', textResult(feedbackPrepareFailure(new FeedbackPreparationError('FEEDBACK_INPUT_INVALID')), true));
             return;
         }
         let operation = 'prepare';
         try {
-            const prepared = await prepareFeedback(args, { getBridgeStatus: collectDeviceEvidence, readExtensionLogRows: readLogRows });
+            const prepared = await prepareFeedback(args, { getBridgeStatus: collectDeviceEvidence, readExtensionLogRows: readLogRows, clientName: clientInfo?.name });
             operation = 'prepare_result';
             const reportResource = prepared?.reportResource;
             if (!reportResource || reportResource.name !== 'report.md') throw new Error('missing report resource');
@@ -535,12 +496,6 @@ export const createMcpMessageHandler = ({
     };
 
     const handleFeedbackSubmit = async (id, args = {}) => {
-        if (hasFeedbackCloudTransport(args)) {
-            // The cloud hook uploads Cowork reports itself. Cowork routes isError to PostToolUseFailure, so this
-            // answer is never an MCP error: the PostToolUse that uploads and replaces it has to run.
-            sendResult(id, textResult(feedbackCloudSubmitPlaceholder(args)));
-            return;
-        }
         if (!validateToolArguments('submit_e_comet_feedback', args).ok) {
             // The authored artifactId is carried through when it is usable, so a caller can attribute the refusal.
             sendOperationResult(id, 'submit_e_comet_feedback', textResult({

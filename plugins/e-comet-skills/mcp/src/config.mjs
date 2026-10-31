@@ -163,12 +163,6 @@ export const FEEDBACK_EVIDENCE_TIMEOUT_MS = 5000;
 // The archive's copy of the extension's own log (extension-log.json), newest rows kept. The whole log is at most 3,000
 // rows, typically well under 2 MiB, and the 32 MiB report limit also has to hold the transcript.
 export const FEEDBACK_EXTENSION_LOG_MAX_BYTES = 4 * 1024 * 1024;
-// Cowork carries the same file inside the device's inert prepare answer, and that answer carries it twice: in
-// structuredContent and in the pretty-printed text copy, escaped again on the wire. Only 64 KiB is measured safe on
-// the device bridge (the other direction; 1 MiB crashed Desktop), so the serialized answer stays within
-// FEEDBACK_CLOUD_ANSWER_MAX_BYTES, and the log gets what the projection leaves, at most 12 KiB of text.
-export const FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES = 12 * 1024;
-export const FEEDBACK_CLOUD_ANSWER_MAX_BYTES = 64 * 1024;
 export const FEEDBACK_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
 // Bounds for reading the extension's own connection log from a browser profile on disk (leveldb-read.mjs), on the
 // failure path only. The log value is at most 3,000 rows, about 1-2 MiB of JSON; LevelDB rolls its write-ahead log at a

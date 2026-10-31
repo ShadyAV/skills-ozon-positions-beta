@@ -44,7 +44,6 @@ const GRANT_HANDOFF_RESERVE_MS = 5_000;
 // WHY: the grant must survive ordinary Post->Pre scheduling and the start of the PUT. Its expiry
 // is not coupled to the uploader's longer wall deadline for completing an already-started request.
 const MIN_STAGE_GRANT_REMAINING_MS = GRANT_START_WINDOW_MS + GRANT_HANDOFF_RESERVE_MS;
-// A grant claimed inside its last minute can still expire before the Cowork cloud PUT starts: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
 const MIN_CLAIM_GRANT_REMAINING_MS = GRANT_START_WINDOW_MS;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const HEADER_VALUE_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
@@ -52,8 +51,6 @@ const ISO_EXPIRY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\
 const PROTOTYPE_SPECIAL_HEADER_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 const LOCAL_FEEDBACK_TOOL =
     /^mcp__(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:prepare_e_comet_feedback|submit_e_comet_feedback)$/;
-const CLOUD_FEEDBACK_TOOL =
-    /^mcp__remote-devices__plugin_e-comet-skills_e-comet-local__(?:prepare_e_comet_feedback|submit_e_comet_feedback)$/;
 const REMOTE_REPORT_ISSUE_TOOL = new RegExp(
     `^mcp__(?:e[-_]comet|e_comet_stage|https_mcp_(?:stage_int_)?e[-_]comet_io_mcp|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|${COWORK_UUID_NAMESPACE})__report_issue$`
 );
@@ -87,9 +84,9 @@ const eventNameFromEvent = (event) => event.hook_event_name ?? event.hookEventNa
 const toolNameFromEvent = (event) => event.tool_name ?? event.toolName;
 const toolInputFromEvent = (event) => event.tool_input ?? event.toolInput;
 const toolResponseFromEvent = (event) => event.tool_response ?? event.toolResponse;
-// Claude Code names a call it serves to a cloud session (Cowork) `served:<caller>`. No hook can change such a
-// session's device calls, so the model copies the upload grant there and nothing is staged.
-const servedCall = (event) => String(event?.session_id ?? event?.sessionId ?? '').startsWith('served:');
+// A hook in Claude's cloud sandbox (Cowork) cannot change the device calls, so the model copies the upload grant there
+// and nothing is staged, unless a hook prepared the report in this session (a cloud session running the local tools).
+const cloudSandbox = (env) => env?.CLAUDE_CODE_REMOTE === 'true';
 
 const hashSessionId = (sessionId) =>
     createHash('sha256').update(validateSessionId(sessionId), 'utf8').digest('hex');
@@ -105,9 +102,6 @@ const resolveStoreDirectory = (env) => {
     return join(resolve(pluginData), STORE_DIRECTORY);
 };
 
-export const cloudPostToolOutput = result => ({ exitCode: 0, stdout: JSON.stringify({ hookSpecificOutput: {
-    hookEventName: 'PostToolUse', updatedToolOutput: [{ type: 'text', text: JSON.stringify(result) }],
-} }), stderr: '' });
 const preparedPathForSession = (dataDirectory, sessionId) =>
     join(dataDirectory, `${hashSessionId(sessionId)}.prepared.json`);
 const grantPathForSession = (dataDirectory, sessionId) =>
@@ -115,25 +109,12 @@ const grantPathForSession = (dataDirectory, sessionId) =>
 const claimedMarkerPathForSession = (dataDirectory, sessionId) =>
     join(dataDirectory, `${hashSessionId(sessionId)}.grant.claimed`);
 
-const hasSessionHandoff = async (directory, sessionId) => {
-    for (const path of [preparedPathForSession(directory, sessionId), grantPathForSession(directory, sessionId)]) {
-        try {
-            await stat(path);
-            return true;
-        } catch (error) {
-            if (error?.code !== 'ENOENT') throw error;
-        }
+const hasPreparedState = async (env, event) => {
+    try {
+        return await stat(preparedPathForSession(resolveStoreDirectory(env), sessionIdFromEvent(event))).then(() => true, () => false);
+    } catch {
+        return false;
     }
-    return false;
-};
-
-const cloudHandoffForSession = async (env, sessionId) => {
-    // The remote report_issue namespace identifies its provider, not the local prepare/submit
-    // consumer. Both consumers can use that provider; route this grant through the session's prepared
-    // state. Without matching prepared metadata, stageUploadGrant rejects rather than creating a
-    // native grant.
-    const directory = join(resolveStoreDirectory(env), '..', 'feedback-cloud-v1', 'handoff');
-    return await hasSessionHandoff(directory, sessionId) ? directory : undefined;
 };
 
 const ensurePrivateStoreDirectory = async (dataDirectory) => {
@@ -175,7 +156,7 @@ const publishState = async (path, value) => {
     }
 };
 
-// Reads through a symlink, unlike the cloud store's lstat: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
+// Reads through a symlink: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
 const readBoundedState = async (path) => {
     const metadata = await stat(path);
     if (!metadata.isFile() || metadata.size > MAX_STATE_FILE_BYTES) {
@@ -740,11 +721,8 @@ const createClaimMarker = async (markerPath) => {
 };
 
 /**
- * Returns the transport of the grant staged for one prepared artifact. The native route consumes it:
- * nothing else there elects a single uploader, so the claim itself has to be the one-shot election. The
- * cloud route does not, because its exclusive attempt file already elects one uploader, and a refusal
- * that sent nothing would otherwise cost one of the few authorizations the service issues per hour;
- * that route discards the grant once the upload it covered has ended.
+ * Consumes the grant staged for one prepared artifact and returns its transport. Nothing else elects a
+ * single uploader, so the claim itself is the one-shot election.
  */
 export const claimUploadGrant = async ({
     dataDirectory,
@@ -753,7 +731,6 @@ export const claimUploadGrant = async ({
     targetTool,
     nowMs = Date.now(),
     retentionMs = STATE_RETENTION_MS,
-    consume = true,
 }) => {
     validateSessionId(sessionId);
     if (targetTool !== SUBMIT_TARGET_TOOL) {
@@ -786,17 +763,14 @@ export const claimUploadGrant = async ({
     );
     // Exclusive create is the one-shot election: a rename reports success to more than one native
     // Windows caller, and reading only after winning keeps a later winner from seeing consumed bytes.
-    if (consume) {
-        try {
-            await createClaimMarker(markerPath);
-        } catch (error) {
-            // Only an existing marker means a consumed grant; any other failure is a storage error.
-            if (safeFeedbackProperty(error, 'code') !== 'EEXIST') throw error;
-            throw grantMissing(error);
-        }
+    try {
+        await createClaimMarker(markerPath);
+    } catch (error) {
+        // Only an existing marker means a consumed grant; any other failure is a storage error.
+        if (safeFeedbackProperty(error, 'code') !== 'EEXIST') throw error;
+        throw grantMissing(error);
     }
-    // A claim that consumes nothing holds no election to release.
-    const releaseElection = async () => { if (consume) await removeFile(markerPath).catch(() => undefined); };
+    const releaseElection = () => removeFile(markerPath).catch(() => undefined);
     let entry;
     try {
         entry = parseGrantEntry(await readBoundedState(grantPath), { nowMs, retentionMs, allowExpired: true });
@@ -818,26 +792,24 @@ export const claimUploadGrant = async ({
         );
     }
     if (entry.expiresAt * 1000 - nowMs < MIN_CLAIM_GRANT_REMAINING_MS) {
-        // The doomed authorization is removed on both routes; the prepared artifact stays for the one
+        // The doomed authorization is removed; the prepared artifact stays for the one
         // fresh report_issue this refusal names, which a kept grant would otherwise refuse as a conflict.
         await removeFile(grantPath);
         await releaseElection();
         throw grantRefreshRequired();
     }
-    if (consume) {
-        // Consume the grant before releasing the election: no second reader may observe it. The removal
-        // is strict, because a grant that is already gone was consumed by someone else and this call
-        // holds no authorization. A grant that cannot be removed right now was not consumed either, so
-        // the election is released with the error.
-        try {
-            await consumeFile(grantPath);
-        } catch (error) {
-            await removeFile(markerPath).catch(() => undefined);
-            if (safeFeedbackProperty(error, 'code') === 'ENOENT') throw grantMissing(error);
-            throw error;
-        }
-        await removeFile(markerPath);
+    // Consume the grant before releasing the election: no second reader may observe it. The removal
+    // is strict, because a grant that is already gone was consumed by someone else and this call
+    // holds no authorization. A grant that cannot be removed right now was not consumed either, so
+    // the election is released with the error.
+    try {
+        await consumeFile(grantPath);
+    } catch (error) {
+        await releaseElection();
+        if (safeFeedbackProperty(error, 'code') === 'ENOENT') throw grantMissing(error);
+        throw error;
     }
+    await removeFile(markerPath);
     return {
         uploadUrl: entry.uploadUrl,
         objectKey: entry.objectKey,
@@ -846,19 +818,6 @@ export const claimUploadGrant = async ({
         expectedSize: entry.sizeBytes,
         expectedSha256: entry.sha256,
     };
-};
-
-/**
- * Removes the authorization staged for this session once the upload it covered has ended. Only the
- * route that does not consume on claim needs it, and whatever is staged is that same authorization: a
- * new preparation clears the session's grant, and only one can be staged at a time.
- */
-export const discardUploadGrant = async ({ dataDirectory, sessionId }) => {
-    validateSessionId(sessionId);
-    if (typeof dataDirectory !== 'string' || !dataDirectory) {
-        throw new FeedbackHandoffError('FEEDBACK_INVALID_STATE', 'The feedback handoff state is invalid.');
-    }
-    await removeFile(grantPathForSession(dataDirectory, sessionId));
 };
 
 const validateTranscriptPath = (path) => {
@@ -923,11 +882,9 @@ const FEEDBACK_DENIAL_CAUSES = Object.freeze({
     ...Object.fromEntries(['FEEDBACK_INVALID_INPUT', 'FEEDBACK_MODEL_TRANSPORT'].map((code) => [code, 'invalid_input'])),
     ...Object.fromEntries(['FEEDBACK_INVALID_EVENT', 'FEEDBACK_INVALID_SESSION', 'FEEDBACK_EVENT_TOO_LARGE'].map((code) => [code, 'invalid_event'])),
     ...Object.fromEntries(['FEEDBACK_INVALID_STATE', 'FEEDBACK_INVALID_GRANT', 'FEEDBACK_INVALID_PREPARED', 'FEEDBACK_CLAIM_INVALID',
-        'FEEDBACK_ARTIFACT_MISMATCH', 'FEEDBACK_PREPARED_MISMATCH', 'FEEDBACK_TOOL_MISMATCH', 'FEEDBACK_GRANT_CONFLICT',
-        'FEEDBACK_UPLOAD_ALREADY_STARTED'].map((code) => [code, 'invalid_state'])),
+        'FEEDBACK_ARTIFACT_MISMATCH', 'FEEDBACK_PREPARED_MISMATCH', 'FEEDBACK_TOOL_MISMATCH', 'FEEDBACK_GRANT_CONFLICT'].map((code) => [code, 'invalid_state'])),
     ...Object.fromEntries(['FEEDBACK_GRANT_MISSING', 'FEEDBACK_PREPARED_MISSING'].map((code) => [code, 'missing'])),
     ...Object.fromEntries(['FEEDBACK_AMBIGUOUS_GRANT', 'FEEDBACK_AMBIGUOUS_PREPARED'].map((code) => [code, 'ambiguous'])),
-    FEEDBACK_STATE_MISSING: 'state_missing',
     FEEDBACK_GRANT_REFRESH_REQUIRED: 'expired',
     FEEDBACK_DATA_DIR_UNAVAILABLE: 'storage_unavailable',
     FEEDBACK_STORAGE_ERROR: 'io_error',
@@ -939,17 +896,6 @@ const safeHookError = (error, operation) => {
     const details = feedbackDiagnostics(error, operation);
     const owned = ownedErrors.get(error);
     if (owned) return { ...owned, details };
-    // Cloud helpers cross a module boundary, so use only closed diagnostic reasons,
-    // never an exception's arbitrary message or code, for public classification.
-    const cloudFailures = {
-        invalid_input: ['FEEDBACK_INVALID_INPUT', 'The authored feedback arguments are invalid.'],
-        invalid_state: ['FEEDBACK_INVALID_STATE', 'The trusted cloud feedback state could not be verified.'],
-        state_missing: ['FEEDBACK_STATE_MISSING', 'The cloud feedback state is absent; the outcome of an earlier upload cannot be established.'],
-        storage_unavailable: ['FEEDBACK_DATA_DIR_UNAVAILABLE', 'The host did not provide cloud feedback storage.'],
-        upload_already_started: ['FEEDBACK_UPLOAD_ALREADY_STARTED', 'An existing upload attempt prevents another request.'],
-    };
-    const cloudFailure = cloudFailures[details.reason];
-    if (cloudFailure) return { code: cloudFailure[0], message: cloudFailure[1], details };
     const filesystemBlocked = FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES.includes(details.systemCode);
     if (filesystemBlocked) return { code: 'FEEDBACK_STORAGE_ERROR', message: 'A local feedback filesystem operation could not complete.', details };
     if (safeFeedbackProperty(error, 'code') === 'FEEDBACK_CLAIM_INVALID') {
@@ -958,22 +904,7 @@ const safeHookError = (error, operation) => {
     return { code: 'FEEDBACK_INTERNAL_ERROR', message: 'The local feedback handoff failed internally.', details: { ...details, reason: 'internal_error' } };
 };
 
-const cloudDenialRecovery = (code, target) => {
-    if (code === 'FEEDBACK_INVALID_INPUT') {
-        return 'Correct the authored arguments using the existing user consent and history choice; this denial did not start an upload.';
-    }
-    if (code === 'FEEDBACK_TRANSCRIPT_UNAVAILABLE') {
-        return 'This host gives plugins no session history here, so a report with history cannot be prepared and no upload started. Ask the user whether to prepare it without history (includeTranscript:false); never retry with history.';
-    }
-    // A preparation denial precedes every authorization and upload of this flow, so the submit wording
-    // about unestablished upload state would describe a state this call cannot have produced.
-    if (target === 'prepare_e_comet_feedback') {
-        return 'This preparation did not start and no upload state exists; fix the named prerequisite and prepare again with the same consent and history choice.';
-    }
-    return 'Existing upload state could not be established; do not obtain another grant or start another feedback flow to bypass this failure. Preserve the same artifact and safe evidence for support.';
-};
-
-export const prepareInputWithTrustedTranscript = (event) => {
+const prepareInputWithTrustedTranscript = (event) => {
     validateSessionId(event.session_id ?? event.sessionId);
     const toolInput = toolInputFromEvent(event);
     if (!isRecord(toolInput) || !FEEDBACK_KINDS.has(toolInput.kind) || typeof toolInput.includeTranscript !== 'boolean') {
@@ -985,9 +916,7 @@ export const prepareInputWithTrustedTranscript = (event) => {
         hasOwn(toolInput, 'feedbackClaim') ||
         hasOwn(toolInput, 'feedback_claim') ||
         hasOwn(toolInput, 'feedbackSession') ||
-        hasOwn(toolInput, 'feedback_session') ||
-        hasOwn(toolInput, 'feedbackAdapter') ||
-        hasOwn(toolInput, 'feedback_adapter')
+        hasOwn(toolInput, 'feedback_session')
     ) {
         throw new FeedbackHandoffError(
             'FEEDBACK_MODEL_TRANSPORT',
@@ -1009,7 +938,7 @@ export const prepareInputWithTrustedTranscript = (event) => {
 
 // Hooks receive arguments, not the host's JSON-RPC id/_meta. Leave bounded headroom
 // for supported host envelopes, in addition to measuring the injected fields themselves.
-export const FEEDBACK_ENVELOPE_RESERVE_BYTES = 4096;
+const FEEDBACK_ENVELOPE_RESERVE_BYTES = 4096;
 const REPORT_SHORTENING_MARKER = '\n[... middle omitted to fit the feedback request size limit ...]\n';
 const shortenReportMiddle = (text, retained) => {
     if (retained >= text.length) return text;
@@ -1075,25 +1004,6 @@ const processHookEventAuthoritative = async (event, _options = {}, observed = {}
 
     const eventName = eventNameFromEvent(event);
     const toolName = toolNameFromEvent(event);
-    // This measured bridge namespace identifies the split-filesystem surface. OS and
-    // model-authored adapter fields never select cloud execution.
-    // Native matchers tolerate historical spelling aliases; that does not attest an
-    // underscore-spelled cloud consumer. Broaden this boundary only with host evidence.
-    if (CLOUD_FEEDBACK_TOOL.test(toolName)
-        && (['PreToolUse', 'PostToolUse'].includes(eventName)
-            || (eventName === 'PostToolUseFailure' && toolName.endsWith('__prepare_e_comet_feedback')))) {
-        try {
-            const { processCloudFeedbackEvent } = await import('./feedback-cloud.mjs');
-            return await processCloudFeedbackEvent(event, _options);
-        } catch (error) {
-            const submit = toolName.endsWith('__submit_e_comet_feedback');
-            const safeError = safeHookError(error, submit ? 'handoff_submit' : 'handoff_prepare');
-            return eventName === 'PreToolUse'
-                ? { exitCode: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
-                    permissionDecisionReason: `${safeError.code}: ${safeError.message} ${JSON.stringify(safeError.details)} This call was blocked before dispatch. ${cloudDenialRecovery(safeError.code, submit ? 'submit_e_comet_feedback' : 'prepare_e_comet_feedback')}` } }), stderr: '' }
-                : { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message} ${JSON.stringify(safeError.details)}` };
-        }
-    }
     if (
         eventName === 'PostToolUse' &&
         typeof toolName === 'string' &&
@@ -1102,20 +1012,16 @@ const processHookEventAuthoritative = async (event, _options = {}, observed = {}
         // A failed authorization already carries the only fact that matters here, and the service
         // issues very few of them per hour: replacing an exhausted-limit error with a handoff outcome
         // would hide why the report cannot be sent. Nothing is staged for a result that granted nothing.
-        if (isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true || servedCall(event)) {
+        if (isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true) {
             return { exitCode: 0, stdout: '', stderr: '' };
         }
-        let cloudDirectory;
+        if (cloudSandbox(_options.env ?? process.env) && !(await hasPreparedState(_options.env ?? process.env, event))) {
+            observed.skipped = true;
+            return { exitCode: 0, stdout: '', stderr: '' };
+        }
         try {
             const { env = process.env, nowMs = Date.now() } = _options;
             const sessionId = sessionIdFromEvent(event);
-            cloudDirectory = await cloudHandoffForSession(env, sessionId);
-            // A remote grant names kind/size, not the consumer route. If both
-            // routes retain this session, matching sizes cannot prove ownership.
-            if (cloudDirectory && await hasSessionHandoff(resolveStoreDirectory(env), sessionId)) {
-                throw new FeedbackHandoffError('FEEDBACK_PREPARED_MISMATCH',
-                    'Both native and cloud prepared state exist for this session. Inspect the prepared results and handoff evidence before continuing; no grant was staged.');
-            }
             const remoteInput = toolInputFromEvent(event);
             const authored = validateRemoteInput(remoteInput);
             const grant = extractUploadGrant(toolResponseFromEvent(event), {
@@ -1123,18 +1029,15 @@ const processHookEventAuthoritative = async (event, _options = {}, observed = {}
                 expectedSize: authored.sizeBytes,
             });
             await stageUploadGrant({
-                dataDirectory: cloudDirectory ?? resolveStoreDirectory(env),
+                dataDirectory: resolveStoreDirectory(env),
                 sessionId,
                 remoteInput,
                 grant,
                 nowMs,
             });
-            if (cloudDirectory) return cloudPostToolOutput({ ok: true, status: 'grant_staged',
-                message: 'Upload authorization is staged privately for the prepared artifact in this session. Submit only its artifactId.' });
             return { exitCode: 0, stdout: '', stderr: '' };
         } catch (error) {
             const safeError = safeHookError(error, 'handoff_authorize');
-            if (cloudDirectory) return cloudPostToolOutput({ ok: false, status: 'grant_not_staged', error: safeError });
             return { exitCode: 2, stdout: '', stderr: `${safeError.code}: ${safeError.message} ${JSON.stringify(safeError.details)}` };
         }
     }
@@ -1266,17 +1169,9 @@ const processHookEventAuthoritative = async (event, _options = {}, observed = {}
     return { exitCode: 0, stdout: '', stderr: '' };
 };
 
-const feedbackDiagnosticOutcome = (result, eventName) => {
-    if (eventName === 'PostToolUseFailure') return 'failed';
+const feedbackDiagnosticOutcome = (result) => {
     try {
-        const output = JSON.parse(result.stdout).hookSpecificOutput;
-        if (output.permissionDecision === 'deny') return 'denied';
-        const replaced = output.updatedToolOutput?.[0]?.text;
-        if (typeof replaced === 'string') {
-            const status = JSON.parse(replaced).status;
-            if (status === 'uncertain') return 'uncertain';
-            if (['failed', 'not_started', 'grant_not_staged'].includes(status)) return 'failed';
-        }
+        if (JSON.parse(result.stdout).hookSpecificOutput.permissionDecision === 'deny') return 'denied';
     } catch { /* Empty successful native Post output is expected. */ }
     return 'succeeded';
 };
@@ -1286,28 +1181,22 @@ export const processHookEvent = async (event, options = {}) => {
     const result = await processHookEventAuthoritative(event, options, observed);
     const eventName = event?.hook_event_name ?? event?.hookEventName;
     const toolName = event?.tool_name ?? event?.toolName;
-    let cloud = CLOUD_FEEDBACK_TOOL.test(toolName);
     const target = typeof toolName === 'string' ? toolName.slice(toolName.lastIndexOf('__') + 2) : '';
     const family = target === 'prepare_e_comet_feedback' ? 'feedback_prepare'
         : target === 'submit_e_comet_feedback' ? 'feedback_submit'
             : REMOTE_REPORT_ISSUE_TOOL.test(toolName) ? 'feedback_authorization' : undefined;
-    const routedLocal = cloud || LOCAL_FEEDBACK_TOOL.test(toolName);
+    const routedLocal = LOCAL_FEEDBACK_TOOL.test(toolName);
     const routedRemote = eventName === 'PostToolUse' && REMOTE_REPORT_ISSUE_TOOL.test(toolName);
-    if (!family || result.exitCode !== 0 || (!routedRemote && !routedLocal) || (routedRemote && servedCall(event))
-        || !['PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(eventName)) return result;
+    if (!family || result.exitCode !== 0 || (!routedRemote && !routedLocal) || observed.skipped
+        || !['PreToolUse', 'PostToolUse'].includes(eventName)) return result;
     if (eventName === 'PostToolUse' && family === 'feedback_prepare'
         && isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true) return result;
     if (eventName === 'PostToolUse' && family === 'feedback_authorization'
         && isRecord(toolResponseFromEvent(event)) && toolResponseFromEvent(event).isError === true) return result;
     let decision;
-    let updatedToolOutput = false;
     if (result.stdout) {
-        try {
-            const output = JSON.parse(result.stdout).hookSpecificOutput;
-            decision = output?.permissionDecision;
-            updatedToolOutput = output?.updatedToolOutput !== undefined;
-            if (family === 'feedback_authorization' && updatedToolOutput) cloud = true;
-        } catch { return result; }
+        try { decision = JSON.parse(result.stdout).hookSpecificOutput?.permissionDecision; }
+        catch { return result; }
     }
     if (eventName === 'PreToolUse' && decision !== 'deny') {
         try {
@@ -1316,12 +1205,12 @@ export const processHookEvent = async (event, options = {}) => {
     }
     return withHookDiagnostic(result, () => ({
         event: eventName, toolFamily: family,
-        handler: cloud && family !== 'feedback_authorization' ? 'feedback_cloud' : 'feedback_handoff',
+        handler: 'feedback_handoff',
         stage: eventName === 'PreToolUse' ? decision === 'deny' ? 'call_denied' : 'input_rewritten'
-            : updatedToolOutput ? 'result_replaced' : family === 'feedback_authorization' ? 'handoff_staged' : 'result_observed',
-        outcome: feedbackDiagnosticOutcome(result, eventName),
-        observedAt: new Date(options.nowMs ?? options.cloud?.now?.() ?? Date.now()).toISOString(),
-        executionPlane: cloud ? 'cloud' : 'native',
+            : family === 'feedback_authorization' ? 'handoff_staged' : 'result_observed',
+        outcome: feedbackDiagnosticOutcome(result),
+        observedAt: new Date(options.nowMs ?? Date.now()).toISOString(),
+        executionPlane: 'native',
         ...(decision === 'deny' && observed.denial
             ? denialEvidence(FEEDBACK_DENIAL_CAUSES[observed.denial.code] ?? observed.denial.details?.reason, observed.denial.details?.systemCode) : {}),
     }));
@@ -1358,6 +1247,4 @@ const main = async () => {
 };
 
 const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-// Finish module evaluation before a cloud executor imports the reusable handoff
-// helpers. Awaiting main here would form a dynamic-import/top-level-await cycle.
-if (isMain) void main();
+if (isMain) await main();

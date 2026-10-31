@@ -1,7 +1,6 @@
 import {
     DEFAULT_IMAGE_PHOTOS,
     DEFAULT_RETURNED_PRODUCTS,
-    FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES,
     FEEDBACK_KINDS,
     FEEDBACK_MAX_BYTES,
     MAX_BROWSER_JOB_TOKEN_BYTES,
@@ -14,7 +13,6 @@ import {
 import { BRIDGE_CODES, BRIDGE_COMSPEC_STATES, BRIDGE_OWNERS, BRIDGE_REGISTRATION_STATES, BRIDGE_RUNTIME_RECHECKS, BRIDGE_RUNTIMES, BRIDGE_STATUS_CODES } from './bridge-codes.mjs';
 import { FEEDBACK_DIAGNOSTIC_OPERATIONS, FEEDBACK_DIAGNOSTIC_ERROR_TYPES, FEEDBACK_DIAGNOSTIC_SYSTEM_CODES, FEEDBACK_DIAGNOSTIC_MODULES, FEEDBACK_DIAGNOSTIC_REASONS } from './feedback-diagnostics.mjs';
 import { CONTRACT_TOOL_NAMES } from './tool-contracts.mjs';
-import { feedbackCloudTransportSchema, feedbackHostAdapterMarkerSchema } from './feedback-host-adapter.mjs';
 import {
     EXTENSION_UPDATE_URL,
     FETCH_ERROR_CODES,
@@ -36,7 +34,6 @@ import { DIAGNOSTIC_STATES, EXTENSION_INSTALL_VOCABULARY, extensionInstallFactsS
 import { TRANSPORT_EVENT_KINDS } from './transport-events.mjs';
 // The producers validate their facts against these; the feedback projection reads the same objects.
 export { extensionInstallFactsSchema, hookPermissionsFactsSchema };
-import { feedbackDeviceSnapshotSchema } from './feedback-device-diagnostics.mjs';
 
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
@@ -988,7 +985,6 @@ const feedbackPrepareSchema = object(
         transcriptPath: hookOnlyFeedbackField({ type: 'string', minLength: 1, maxLength: 4096, description: 'Trusted local transcript path.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'Local feedback handoff signature injected by the trusted host hook.' }),
         feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
-        feedbackAdapter: hookOnlyFeedbackField({ ...feedbackHostAdapterMarkerSchema, description: 'Host feedback result adapter marker.' }),
     },
     ['kind', 'summary', 'details', 'includeTranscript']
 );
@@ -998,13 +994,12 @@ const feedbackSubmitSchema = object(
         uploadUrl: grantFeedbackField({ type: 'string', minLength: 1, maxLength: 8192, description: 'Signed HTTPS upload URL.' }),
         requiredHeaders: grantFeedbackField({ type: 'object', properties: {}, additionalProperties: { type: 'string', maxLength: 8192 }, description: 'Signed required request headers.' }),
         objectKey: grantFeedbackField({ type: 'string', minLength: 1, maxLength: 1024, description: 'Storage object key.' }),
-        expiresAt: grantFeedbackField({ oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$' }],
-            description: 'Upload grant expiry: Unix seconds, or report_issue expires_at as an ISO UTC time.' }),
+        // Untyped: the hook injects Unix seconds, a Cowork model copies report_issue's ISO time; submit checks either.
+        expiresAt: grantFeedbackField({ description: 'Upload grant expiry: Unix seconds, or report_issue expires_at as it came.' }),
         expectedSize: grantFeedbackField({ type: 'integer', minimum: 1, maximum: FEEDBACK_MAX_BYTES, description: 'Expected archive size in bytes.' }),
         expectedSha256: grantFeedbackField({ ...feedbackSha256, description: 'Expected archive SHA-256.' }),
         feedbackClaim: hookOnlyFeedbackField({ ...feedbackClaim, description: 'Local feedback handoff signature injected by the trusted host hook.' }),
         feedbackSession: hookOnlyFeedbackField({ ...feedbackSession, description: 'Bound host-session digest for the feedback claim.' }),
-        feedbackCloud: hookOnlyFeedbackField({ ...feedbackCloudTransportSchema, description: 'Cloud submission marker injected by the trusted cloud hook, which uploads the archive itself.' }),
     },
     ['artifactId']
 );
@@ -1065,35 +1060,6 @@ const feedbackSubmitSuccessSchema = object(
 const feedbackSubmitFailureSchema = object(
     { ok: { const: false }, status: { type: 'string', enum: ['failed', 'rejected', 'uncertain'] }, artifactId: feedbackArtifactIdSchema, error: feedbackErrorSchema },
     ['ok', 'status', 'error']
-);
-const feedbackCloudNotStartedSchema = object({
-    ok: { const: false }, status: { const: 'not_started' }, artifactId: feedbackArtifactIdSchema,
-    // insufficient_execution_budget is no longer produced: no route runs an execution budget check.
-    // It stays accepted so attempt and operation records the previous build wrote remain
-    // readable for the rest of their 24-hour retention.
-    reason: { type: 'string', enum: ['insufficient_execution_budget', 'FEEDBACK_GRANT_REFRESH_REQUIRED'] },
-    error: feedbackErrorObject({ code: { type: 'string', enum: ['insufficient_execution_budget', 'FEEDBACK_GRANT_REFRESH_REQUIRED', 'FEEDBACK_GRANT_MISSING', 'FEEDBACK_SUBMISSION_FAILED'] },
-        message: feedbackMessage, stage: { const: 'handoff' }, retryable: { const: false } }, ['code', 'message', 'stage', 'retryable']),
-}, ['ok', 'status', 'artifactId', 'error']);
-const feedbackPrepareHostUnavailableSchema = object(
-    {
-        ok: { const: false },
-        status: { const: 'host_result_unavailable' },
-        adapter: object({
-            ...feedbackHostAdapterMarkerSchema.properties,
-            targetTool: { const: 'prepare_e_comet_feedback' },
-        }, ['version', 'operationId', 'nonce', 'targetTool']),
-        bridgeStatus: feedbackDeviceSnapshotSchema,
-        extensionLog: { type: 'string', maxLength: FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES },
-        extensionLogTrimmed: { const: true },
-        error: object({
-            code: { const: 'FEEDBACK_HOST_RESULT_UNAVAILABLE' },
-            message: feedbackMessage,
-            stage: { const: 'handoff' },
-            retryable: { const: false },
-        }, ['code', 'message', 'stage', 'retryable']),
-    },
-    ['ok', 'status', 'adapter', 'bridgeStatus', 'error']
 );
 
 const describedToolName = described(
@@ -1219,8 +1185,8 @@ export const toolOutputSchemas = {
     wb_filters_by_query: withRunningAnswer(withOperationDiagnostic(objectUnion(...liveAggregateSchemas(filtersSuccessSchema), toolErrorSchema))),
     wb_recommendations_by_product: withRunningAnswer(withOperationDiagnostic(objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema))),
     wb_seller_reviews: withRunningAnswer(withOperationDiagnostic(objectUnion(sellerReviewsSuccessSchema, toolErrorSchema))),
-    prepare_e_comet_feedback: withOperationDiagnostic(objectUnion(feedbackPrepareSuccessSchema, feedbackPrepareFailureSchema, feedbackPrepareHostUnavailableSchema)),
-    submit_e_comet_feedback: withOperationDiagnostic(objectUnion(feedbackSubmitSuccessSchema, feedbackSubmitFailureSchema, feedbackCloudNotStartedSchema)),
+    prepare_e_comet_feedback: withOperationDiagnostic(objectUnion(feedbackPrepareSuccessSchema, feedbackPrepareFailureSchema)),
+    submit_e_comet_feedback: withOperationDiagnostic(objectUnion(feedbackSubmitSuccessSchema, feedbackSubmitFailureSchema)),
     wb_product_images: withOperationDiagnostic(objectUnion(...liveAggregateSchemas(imagesSuccessSchema), toolErrorSchema)),
     ozon_seller_promotion_report: withRunningAnswer(withOperationDiagnostic(objectUnion(ozonPromotionSuccessSchema, ozonPromotionFailureSchema, ozonPromotionPreflightFailureSchema))),
     ozon_seller_promotion_reports: withRunningAnswer(withOperationDiagnostic(packageResultSchema(

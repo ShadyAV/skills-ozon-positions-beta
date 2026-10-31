@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 
 const EVENTS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure']);
 const TOOL_FAMILIES = new Set(['browser_job', 'feedback_prepare', 'feedback_authorization', 'feedback_submit']);
-const HANDLERS = new Set(['browser_job_handoff', 'feedback_handoff', 'feedback_cloud']);
-const STAGES = new Set(['handoff_staged', 'input_rewritten', 'call_denied', 'result_observed', 'result_replaced']);
+const HANDLERS = new Set(['browser_job_handoff', 'feedback_handoff']);
+const STAGES = new Set(['handoff_staged', 'input_rewritten', 'call_denied', 'result_observed']);
 const OUTCOMES = new Set(['succeeded', 'denied', 'failed', 'uncertain']);
 const EXECUTION_PLANES = new Set(['native', 'cloud', 'unknown']);
 const CAUSES = new Set(['invalid_event', 'invalid_input', 'invalid_state', 'state_missing', 'storage_unavailable',

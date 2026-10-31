@@ -107,25 +107,22 @@ const archivedRow = (/** @type {unknown} */ row) => JSON.stringify(redactLeaves(
 
 /**
  * The archive's extension-log.json: the whole log when the history is included, only the connection rows when it is
- * not, cut to `maxBytes`. The native file keeps the newest rows in the order the extension stored them; the Cowork file
- * (`connectionFirst`) puts the connection rows first and fills the rest with the newest other rows. Undefined when no
- * row is left.
- * @param {unknown} rows @param {{ includeTranscript: boolean, maxBytes: number, connectionFirst?: boolean }} options
+ * not, cut to `maxBytes`. It keeps the newest rows in the order the extension stored them. Undefined when no row is left.
+ * @param {unknown} rows @param {{ includeTranscript: boolean, maxBytes: number }} options
  * @returns {{ text: string, rows: number, trimmed: boolean } | undefined}
  */
-export const feedbackExtensionLog = (rows, { includeTranscript, maxBytes, connectionFirst = false }) => {
+const feedbackExtensionLog = (rows, { includeTranscript, maxBytes }) => {
     const candidates = (Array.isArray(rows) ? rows : []).filter((row) => includeTranscript || row?.requestId === CONNECTION_ROWS)
-        .map((row, index) => ({ index, group: connectionFirst && row?.requestId !== CONNECTION_ROWS ? 1 : 0, text: archivedRow(row) }));
+        .map((row, index) => ({ index, text: archivedRow(row) }));
     const kept = [];
     let size = 2;
-    // Accepted residual "An oversized extension-log row drops the Cowork log unflagged": docs/local-agent-architecture.md#accepted-residuals.
-    for (const item of [...candidates].sort((a, b) => a.group - b.group || b.index - a.index)) {
+    for (const item of [...candidates].reverse()) {
         size += Buffer.byteLength(item.text, 'utf8') + (kept.length ? 1 : 0);
         if (size > maxBytes) break;
         kept.push(item);
     }
     if (kept.length === 0) return undefined;
-    kept.sort((a, b) => a.group - b.group || a.index - b.index);
+    kept.reverse();
     return { text: `[${kept.map(({ text }) => text).join(',')}]`, rows: kept.length, trimmed: kept.length < candidates.length };
 };
 
@@ -136,12 +133,12 @@ export const feedbackExtensionLog = (rows, { includeTranscript, maxBytes, connec
  * @param {{ readExtensionLogRows?: () => Promise<{ rows?: unknown }>, timeoutMs?: number }} options
  * @returns {Promise<unknown>}
  */
-export const readFeedbackExtensionLogRows = ({ readExtensionLogRows, timeoutMs = FEEDBACK_EVIDENCE_TIMEOUT_MS }) =>
+const readFeedbackExtensionLogRows = ({ readExtensionLogRows, timeoutMs = FEEDBACK_EVIDENCE_TIMEOUT_MS }) =>
     readExtensionLogRows ? settle(async () => (await readExtensionLogRows())?.rows, timeoutMs) : Promise.resolve(undefined);
 
 /**
  * Reads the log rows within the evidence deadline and builds the archive file from them.
- * @param {{ readExtensionLogRows?: () => Promise<{ rows?: unknown }>, includeTranscript: boolean, maxBytes: number, connectionFirst?: boolean, timeoutMs?: number }} options
+ * @param {{ readExtensionLogRows?: () => Promise<{ rows?: unknown }>, includeTranscript: boolean, maxBytes: number, timeoutMs?: number }} options
  */
 export const collectFeedbackExtensionLog = async ({ readExtensionLogRows, timeoutMs, ...options }) =>
     feedbackExtensionLog(await readFeedbackExtensionLogRows({ readExtensionLogRows, timeoutMs }), options);

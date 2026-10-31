@@ -14,7 +14,12 @@ import { assertUploadDestination, putFeedbackArchive } from './feedback-upload.m
 import { FeedbackPreparationError, feedbackSubmissionFailure } from './feedback-errors.mjs';
 import { feedbackDiagnostics, safeFeedbackProperty, withFeedbackOperation } from './feedback-diagnostics.mjs';
 import { diagnosticCheck } from './diagnostic-facts.mjs';
+import { isPublishableObjectKey } from './tool-schemas.mjs';
 
+// Codex runs its hooks beside this process and asks to trust them again after every plugin update. An unsigned call
+// from it means its hooks did not run, so it fails closed before report_issue spends one of the few authorizations the
+// service issues per hour. Claude Code is left out: an older Cowork device bridge also named itself claude-code.
+const HOOKED_CLIENTS = new Set(['codex-mcp-client']);
 const ARTIFACT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 
@@ -140,24 +145,12 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
 
 /** @typedef {(input: { reportBytes: Buffer, metadataBytes: Buffer, transcriptBytes?: Buffer, extensionLogBytes?: Buffer }, options: { maxBytes: number }) => Buffer | Promise<Buffer>} FeedbackZipCreator */
 
-// The device's text as the Cowork cloud hook delivers it: a JSON array the device already redacted and cut. Whether
-// the cut left rows out comes beside it (`extensionLogTrimmed`).
-const cloudExtensionLog = (/** @type {Buffer} */ bytes) => {
-    try {
-        const rows = Buffer.isBuffer(bytes) ? JSON.parse(bytes.toString('utf8')) : undefined;
-        return Array.isArray(rows) && rows.length > 0 ? { bytes, rows: rows.length } : undefined;
-    } catch {
-        return undefined;
-    }
-};
-
 /**
  * Creates and stores an immutable feedback archive. transcriptPath is injected by the trusted host hook.
- * `dependencies` is an internal composition/test seam; production supplies getBridgeStatus and, on the device,
- * readExtensionLogRows (or, from the Cowork cloud hook, extensionLogBytes and extensionLogTrimmed: the device left
- * rows out) and uses the validated built-in persistence, ZIP, claim, clock, and runtime metadata functions.
+ * `dependencies` is an internal composition/test seam; production supplies getBridgeStatus and readExtensionLogRows
+ * and uses the validated built-in persistence, ZIP, claim, clock, and runtime metadata functions.
  * @param {{ kind?: string, summary?: string, details?: string, includeTranscript?: boolean, transcriptPath?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number, route?: 'native' | 'cloud', readExtensionLogRows?: () => Promise<{ rows?: unknown }>, extensionLogBytes?: Buffer, extensionLogTrimmed?: boolean }} dependencies
+ * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number, readExtensionLogRows?: () => Promise<{ rows?: unknown }>, clientName?: string }} dependencies
  */
 export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const {
@@ -171,11 +164,9 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         arch = process.arch,
         version = BRIDGE_VERSION,
         maxBytes = FEEDBACK_MAX_BYTES,
-        // Where this archive is prepared: the native dispatcher on the device, or the Cowork cloud hook.
-        route = 'native',
         readExtensionLogRows = undefined,
-        extensionLogBytes = undefined,
-        extensionLogTrimmed: deviceLogTrimmed = false,
+        // The MCP client the host named at initialize. Cowork's device bridge names the plugin, not Claude Code.
+        clientName = undefined,
     } = dependencies;
     if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof verifySignature !== 'function' || typeof createZip !== 'function' || typeof now !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
         throw new TypeError('Feedback preparation dependencies are invalid');
@@ -185,7 +176,8 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     // never carries history: only a signed hook may name a transcript path, so a model cannot point this process at a
     // file. Accepted residual "Cowork reports go unsigned and without history".
     const signed = feedbackClaim !== undefined || feedbackSession !== undefined || transcriptPath !== undefined;
-    if (!signed && includeTranscript === true) throw hookHandoffUnavailable();
+    if (!signed && (includeTranscript === true || HOOKED_CLIENTS.has(clientName))) throw hookHandoffUnavailable();
+    const route = signed ? 'native' : 'unsigned';
     if (signed) {
         const hookFields = transcriptPath === undefined ? {} : { transcriptPath };
         try {
@@ -196,12 +188,10 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
             throw claimInvalid(error);
         }
     }
-    // The extension's own log for extension-log.json, read alongside the status within the evidence deadline, or
-    // carried from the device's inert answer by the cloud hook. Raw log text never enters the result below.
-    const extensionLogRead = extensionLogBytes === undefined
-        ? collectFeedbackExtensionLog({ readExtensionLogRows, includeTranscript: includeTranscript === true, maxBytes: FEEDBACK_EXTENSION_LOG_MAX_BYTES })
-            .then((log) => log && { bytes: Buffer.from(log.text, 'utf8'), rows: log.rows, trimmed: log.trimmed })
-        : Promise.resolve(cloudExtensionLog(extensionLogBytes));
+    // The extension's own log for extension-log.json, read alongside the status within the evidence deadline. Raw log
+    // text never enters the result below.
+    const extensionLogRead = collectFeedbackExtensionLog({ readExtensionLogRows, includeTranscript: includeTranscript === true, maxBytes: FEEDBACK_EXTENSION_LOG_MAX_BYTES })
+        .then((log) => log && { bytes: Buffer.from(log.text, 'utf8'), rows: log.rows, trimmed: log.trimmed });
     let diagnostics = {};
     try {
         diagnostics = await getBridgeStatus();
@@ -245,7 +235,7 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const transcriptIncluded = includeTranscript === true;
     let transcriptTruncated = false;
     let extensionLog = await extensionLogRead;
-    let extensionLogTrimmed = extensionLog?.trimmed === true || deviceLogTrimmed === true;
+    let extensionLogTrimmed = extensionLog?.trimmed === true;
     const serializeMetadata = (transcriptSizeBytes) => atOperation('metadata_encode', () => serializeFeedbackMetadata({
         createdAt, version, platform, arch, transcriptIncluded, transcriptSizeBytes,
         ...(transcriptTruncated ? { transcriptTruncated: true } : {}),
@@ -336,8 +326,8 @@ const uploadFailure = (artifactId, code, error = undefined, operation = 'upload'
 
 /**
  * Re-verifies and uploads one stored archive. Transport fields are injected by the trusted host hook.
- * @param {{ artifactId?: string, uploadUrl?: string, requiredHeaders?: Record<string, string>, objectKey?: string, expiresAt?: number, expectedSize?: number, expectedSha256?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ loadArtifact?: typeof loadVerifiedFeedbackArtifact, retireArtifact?: typeof retireFeedbackArtifact, upload?: typeof putFeedbackArchive, now?: () => number, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown }} dependencies
+ * @param {{ artifactId?: string, uploadUrl?: string, requiredHeaders?: Record<string, string>, objectKey?: string, expiresAt?: number | string, expectedSize?: number, expectedSha256?: string, feedbackClaim?: string, feedbackSession?: string }} input
+ * @param {{ loadArtifact?: typeof loadVerifiedFeedbackArtifact, retireArtifact?: typeof retireFeedbackArtifact, upload?: typeof putFeedbackArchive, now?: () => number, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown, destinations?: ReadonlyArray<{ hostname: string, pathPrefix: string }> }} dependencies
  */
 const submitFeedback = async (input = {}, dependencies = {}) => {
     const { loadArtifact = loadVerifiedFeedbackArtifact, retireArtifact = retireFeedbackArtifact, upload = putFeedbackArchive, now = Date.now, verifySignature = verifyHookFields,
@@ -363,7 +353,8 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
     // none, so only e-Comet's own storage may receive it: accepted residual "Cowork reports go unsigned and without
     // history". The model copies report_issue's expires_at as it came, an ISO time or epoch seconds.
     const signed = input.feedbackClaim !== undefined || input.feedbackSession !== undefined;
-    const expiresAt = !signed && typeof input.expiresAt === 'string' ? Math.floor(Date.parse(input.expiresAt) / 1000) : input.expiresAt;
+    const expiresAt = typeof input.expiresAt === 'string' ? Math.floor(Date.parse(input.expiresAt) / 1000) : input.expiresAt;
+    let unsignedReportId;
     if (signed) {
         const hookFields = {
             artifactId: input.artifactId,
@@ -381,12 +372,18 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
         } catch (error) {
             return submitError(artifactId, 'failed', 'UPLOAD_GRANT_INVALID', 'The trusted feedback handoff claim could not be verified.', 'grant', false, error, 'claim_verification');
         }
-    } else {
+    } else if (typeof input.uploadUrl === 'string' && URL.canParse(input.uploadUrl)) {
+        // A URL the copy left out or garbled is an incomplete grant, refused below; a well-formed one must lead to e-Comet
+        // storage.
+        let target;
         try {
-            assertUploadDestination(input.uploadUrl, destinations, input.requiredHeaders ?? {});
+            target = assertUploadDestination(input.uploadUrl, destinations, input.requiredHeaders ?? {});
         } catch (error) {
             return submitError(artifactId, 'failed', 'UPLOAD_DESTINATION_REFUSED', 'The feedback upload destination is not an e-Comet storage location.', 'grant', false, error, 'grant_validation');
         }
+        // The object the URL writes is the report's identifier, so a slip in the copied objectKey cannot misname it.
+        const { pathPrefix } = destinations.find(({ hostname, pathPrefix: prefix }) => target.hostname === hostname && target.pathname.startsWith(prefix));
+        try { unsignedReportId = decodeURIComponent(target.pathname.slice(pathPrefix.length)); } catch { /* a garbled escape, refused below */ }
     }
     if (
         artifactId === undefined ||
@@ -395,6 +392,7 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
         typeof input.requiredHeaders !== 'object' ||
         Array.isArray(input.requiredHeaders) ||
         typeof input.objectKey !== 'string' ||
+        (!signed && (typeof unsignedReportId !== 'string' || !isPublishableObjectKey(unsignedReportId))) ||
         !Number.isSafeInteger(expiresAt) ||
         expiresAt * 1000 <= now() ||
         !Number.isSafeInteger(input.expectedSize) ||
@@ -427,7 +425,7 @@ const submitFeedback = async (input = {}, dependencies = {}) => {
     await retireArtifact({ artifactId }).catch(() => undefined);
     // The object key the accepted upload wrote is the one identifier both the seller and support can name.
     // It is published only here, after acceptance: an unaccepted grant names an object that does not exist.
-    return { ok: true, status: 'uploaded', artifactId, transcriptIncluded: artifact.transcriptIncluded, reportId: input.objectKey };
+    return { ok: true, status: 'uploaded', artifactId, transcriptIncluded: artifact.transcriptIncluded, reportId: signed ? input.objectKey : unsignedReportId };
 };
 
 /** @type {typeof submitFeedback} */

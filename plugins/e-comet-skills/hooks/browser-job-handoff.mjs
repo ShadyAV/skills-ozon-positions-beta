@@ -363,6 +363,24 @@ const handoffStorageRecovery = (details) => {
     if (['EACCES', 'EPERM', 'EROFS'].includes(details?.systemCode)) return 'Local storage reports denied access or a read-only filesystem. Check access to plugin storage before retrying; another browser_job will not fix this.';
     return null;
 };
+// SPIKE (throwaway, 2026-10-31): Cowork refuses a device call whose input a hook rewrote, so the model copies
+// trigger_url itself and this hook only compares the copy with the staged original. 'measure' always refuses after
+// comparing; 'live' lets an exact copy through untouched.
+const SPIKE_MODE = 'measure';
+const spikeCompare = (expected, got) => {
+    if (got === expected) return `match len=${expected.length}`;
+    let i = 0;
+    while (i < expected.length && i < got.length && expected[i] === got[i]) i += 1;
+    let tail = 0;
+    while (tail < expected.length - i && tail < got.length - i && expected[expected.length - 1 - tail] === got[got.length - 1 - tail]) tail += 1;
+    const codes = (value) => [...value.slice(i, i + 4)].map((char) => char.charCodeAt(0)).join('.');
+    const normalize = (value) => value.replace(/\s+/g, '').replace(/\\u0026/gi, '&').replace(/&amp;/g, '&');
+    return `mismatch expectedLen=${expected.length} gotLen=${got.length} firstDiff=${i} matchingTail=${tail} ` +
+        `expectedCodes=${codes(expected)} gotCodes=${codes(got)} normalizedMatch=${normalize(got) === normalize(expected)}`;
+};
+const spikeDeny = (verdict) => JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
+    permissionDecisionReason: `SPIKE_COPY ${verdict}. This is a measurement: nothing was sent; continue with the next round.` } });
+
 const deniedPreToolUseOutput = (error) =>
     JSON.stringify({
         hookSpecificOutput: {
@@ -454,6 +472,13 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
                 throw new HandoffError('HANDOFF_INVALID_INPUT', 'The local browser-job arguments are invalid.');
             }
             const targetTool = toolName.slice(toolName.lastIndexOf('__') + 2);
+            const authored = toolInput.triggerUrl ?? toolInput.trigger_url;
+            if (toolName.startsWith('mcp__remote-devices__') && typeof authored === 'string') {
+                const staged = await claimTriggerUrl({ dataDirectory: resolveStoreDirectory(env), sessionId, targetTool, nowMs, fileNow });
+                const verdict = spikeCompare(staged, authored);
+                if (SPIKE_MODE === 'live' && verdict.startsWith('match')) return { exitCode: 0, stdout: '', stderr: '' };
+                return { exitCode: 0, stdout: spikeDeny(verdict), stderr: '' };
+            }
             if (
                 Object.prototype.hasOwnProperty.call(toolInput, 'triggerUrl') ||
                 Object.prototype.hasOwnProperty.call(toolInput, 'trigger_url')

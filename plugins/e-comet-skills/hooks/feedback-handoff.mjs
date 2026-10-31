@@ -882,8 +882,9 @@ const transcriptPathFromEvent = (event) => {
             'The trusted feedback transcript is unavailable.'
         );
     }
-    // Codex may explicitly report that its transcript path is unavailable.
-    if (candidates[0] === null) return undefined;
+    // Codex may explicitly report that its transcript path is unavailable, and Claude Code gives an empty one for a call
+    // it serves to a cloud session (Cowork since 2026-10-31).
+    if (candidates[0] === null || candidates[0] === '') return undefined;
     return validateTranscriptPath(candidates[0]);
 };
 
@@ -957,6 +958,9 @@ const safeHookError = (error, operation) => {
 const cloudDenialRecovery = (code, target) => {
     if (code === 'FEEDBACK_INVALID_INPUT') {
         return 'Correct the authored arguments using the existing user consent and history choice; this denial did not start an upload.';
+    }
+    if (code === 'FEEDBACK_TRANSCRIPT_UNAVAILABLE') {
+        return 'This host gives plugins no session history here, so a report with history cannot be prepared and no upload started. Ask the user whether to prepare it without history (includeTranscript:false); never retry with history.';
     }
     // A preparation denial precedes every authorization and upload of this flow, so the submit wording
     // about unestablished upload state would describe a state this call cannot have produced.

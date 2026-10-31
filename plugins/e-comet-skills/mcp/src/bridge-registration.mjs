@@ -502,6 +502,7 @@ export async function ensureRegistration(deps) {
             // starts no PowerShell. A repair, a tool call that found no broker, writes it anyway: a key removed since is
             // restored when it is needed. Accepted residual: "A restored Windows key is found on the next call".
             // The stamp also keeps since when the key has been found as written; only the key and value decide a write.
+            // Accepted residual "Released plugins rewrite the registry stamp".
             const registryStamp = join(bridgeDir, 'registry.json');
             const stamp = await fs.readFile(registryStamp, 'utf8').then(JSON.parse).catch(() => null);
             const matches = stamp?.key === target.key && stamp?.value === manifestPaths[0];

@@ -440,8 +440,8 @@ response carries the file twice, in `structuredContent` and in its text copy, so
 the whole serialized response fits 64 KiB, and leaves it out when none fits. The cloud
 archive drops it whole before it would shorten `report.md` or `metadata.json`. `metadata.json` says what it holds:
 `extensionLog` with `included`, `rows`, `scope` (`all` with the history, `connection` without) and `trimmed` (rows
-were left out to fit a limit; on the Cowork route it reports the archive fit only, since the device cut the file
-before). The file never appears in a tool result: the prepare result names the archive, not its contents.
+were left out to fit a limit; on the Cowork route also when the device cut the file to fit its answer). The file never
+appears in a tool result: the prepare result names the archive, not its contents.
 
 The report's `## Tool calls` section lists the newest hundred calls of the session in call order, each with the host's
 record time when it wrote one, the safe tool name, and the closed outcome read from the correlated result: `ok`,
@@ -514,6 +514,13 @@ marketplace body or seller data.
   authorization for the same job.
 - `BROWSER_JOB_LEASE_INVALID` (`stage:"local"`): this process received an authorization lease of the wrong shape, an
   e-Comet defect. Report; do not repeat `browser_job`.
+- A signed tool still working after 30 s answers `ok:true`, `status:"running"` with `runId`, `tool`, `elapsedSeconds`
+  and, when the job counts its units, `progress`. It is not a failure: the job continues on this device, and
+  `e_comet_run_result` with that `runId` waits up to 30 s and returns the tool's own final answer unchanged, or
+  `running` again. `RUN_RESULT_UNAVAILABLE` (`stage:"result"`, `retryable:false`) means the result is no longer on this
+  device: it expired 30 minutes after the job ended, or e-Comet restarted. The outcome is unknown, not failed, and has
+  no user step: the agent tells the user and runs the original tool again only if the user asks, since it may create
+  reports again.
 - `INVALID_TOOL_ARGUMENTS`, and the Ozon `PREFLIGHT_FAILED` of a schema failure, name the failing property of the
   tool's own input schema; an argument outside the schema is never echoed. For `triggerUrl` the message says to omit it,
   because the host hook supplies it after `browser_job`. Ozon period rules keep their own text.
@@ -528,10 +535,18 @@ and its trailing hook record carries the closed `cause` (and `systemCode` for a 
 
 | Hook denial | `cause` | Owner and action |
 | --- | --- | --- |
-| `HANDOFF_MISSING` | `missing` | Agent flow: no authorization was waiting for this tool in this conversation. Call `browser_job` once for the intended tool, then the local tool without authorization fields. |
+| `HANDOFF_MISSING`, `HANDOFF_TOOL_MISMATCH` | `missing` | Agent flow: no authorization was waiting for this tool in this conversation. Call `browser_job` once for the intended tool, then the local tool without authorization fields. |
 | `HANDOFF_EXPIRED` | `expired` | Agent flow: the waiting authorization outlived its 90 seconds. One fresh `browser_job` for that tool, then call the local tool right away. |
+| `HANDOFF_MODEL_AUTHORIZATION`, `HANDOFF_INVALID_INPUT` | `invalid_input` | Agent flow: the call itself carried `triggerUrl` or `trigger_url`, or arguments that are not an object; nothing was spent. Remove the field or fix the arguments and call the same local tool again, without a new `browser_job`. |
+| `HANDOFF_INVALID_ENTRY`, `HANDOFF_INVALID_TOKEN` | `invalid_state` | e-Comet: the waiting authorization could not be read and is used up. One fresh `browser_job` for that tool, then the local tool; report if it repeats. |
+| `HANDOFF_INVALID_SESSION` | `invalid_event` | Host: its hook event carried no usable conversation identifier. Another `browser_job` cannot fix it; follow the host skill's plugin check, and report if it persists. |
 | `HANDOFF_DATA_DIR_UNAVAILABLE` | `storage_unavailable` | Host: it gave the hook no plugin storage. Another `browser_job` cannot fix it; follow the host skill's plugin check, and report if it persists. |
 | `HANDOFF_STORAGE_ERROR` | `io_error` | `ENOSPC` or `EDQUOT`: the user frees space; `EACCES`, `EPERM` or `EROFS`: the user restores access to the plugin storage; any other code: report. Another `browser_job` cannot fix it. |
+
+`HANDOFF_TOKEN_NOT_FOUND` is not a denial but a hook error the host shows beside the `browser_job` result: the hook
+found no authorization in the result the host handed it, and its `Diagnostics.responseShape` names that form (types,
+field names and lengths only). Nothing was staged, so the local call then answers `HANDOFF_MISSING`, which here does not
+mean a wrong call order. Another `browser_job` gets the same; owner e-Comet: report it with that form.
 
 ## Native DeepSeek failures
 

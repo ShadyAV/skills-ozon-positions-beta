@@ -121,7 +121,8 @@ export const MAX_ACTIVE_AUTHORIZATION_SCOPES = positiveIntegerEnv('ECOMET_MAX_AC
 export const RESULT_RETENTION_MS = positiveIntegerEnv('ECOMET_RESULT_RETENTION_MS', 24 * 60 * 60 * 1000);
 export const RESULT_MAX_FILE_BYTES = positiveIntegerEnv('ECOMET_RESULT_MAX_FILE_BYTES', 64 * 1024 * 1024);
 // A long tool answers within this wait, and so does each result call: Cowork's cloud drops a device call after 60 s,
-// and that budget also carries the answer over the bridge.
+// and that budget also carries the answer over the bridge. Accepted residual "Long bridge jobs hand over to
+// e_comet_run_result after 30 s": docs/local-agent-architecture.md#accepted-residuals.
 export const RUN_WAIT_MS = positiveIntegerEnv('ECOMET_RUN_WAIT_MS', 30_000);
 export const RUN_RESULT_RETENTION_MS = positiveIntegerEnv('ECOMET_RUN_RESULT_RETENTION_MS', 30 * 60 * 1000);
 export const IMAGE_BASKET_BOUNDS = [

@@ -501,15 +501,17 @@ export const createMcpMessageHandler = ({
             // The answer carries the log twice (structuredContent and the escaped text copy), so the log gets what the
             // projection leaves of the serialized message's budget: at most its cap, shrunk in proportion until it fits.
             const rows = await logRows;
-            const answer = (/** @type {string | undefined} */ text) => feedbackHostResultUnavailable('prepare_e_comet_feedback', args.feedbackAdapter, bridgeStatus, text);
+            const answer = (/** @type {{ text?: string, trimmed?: boolean } | undefined} */ log) => feedbackHostResultUnavailable('prepare_e_comet_feedback', args.feedbackAdapter, bridgeStatus, log);
             const wireBytes = (/** @type {unknown} */ value) => Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id, result: textResult(value) }), 'utf8');
             const bare = wireBytes(answer(undefined));
             let fitted = answer(undefined);
             for (let maxBytes = FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES, attempt = 0; attempt < 4 && maxBytes > 0; attempt += 1) {
                 const log = feedbackExtensionLog(rows, { includeTranscript: args.includeTranscript === true, maxBytes, connectionFirst: true });
                 if (!log) break;
-                const size = wireBytes(answer(log.text));
-                if (size <= FEEDBACK_CLOUD_ANSWER_MAX_BYTES) { fitted = answer(log.text); break; }
+                const size = wireBytes(answer(log));
+                if (size <= FEEDBACK_CLOUD_ANSWER_MAX_BYTES) { fitted = answer(log); break; }
+                // Until a smaller cut fits, the answer leaves every row out.
+                fitted = answer({ trimmed: true });
                 maxBytes = Math.floor(maxBytes * (FEEDBACK_CLOUD_ANSWER_MAX_BYTES - bare) / (size - bare)) - 1;
             }
             sendResult(id, textResult(fitted));

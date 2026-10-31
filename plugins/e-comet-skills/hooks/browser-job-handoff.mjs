@@ -290,6 +290,9 @@ const collectTriggerUrlCandidates = (toolResponse) => {
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
         return typeof parsed.trigger_url === 'string' ? [parsed.trigger_url] : [];
     }
+    // Claude hands over a result of several blocks, and Cowork since 2026-10-31 also one of a single block, as the bare
+    // block array.
+    if (Array.isArray(toolResponse)) return collectTriggerUrlCandidates({ content: toolResponse });
     if (!toolResponse || typeof toolResponse !== 'object' || toolResponse.isError === true) return [];
     const candidates = [];
     for (const structured of [toolResponse.structuredContent, toolResponse.structured_content]) {
@@ -312,6 +315,19 @@ const collectTriggerUrlCandidates = (toolResponse) => {
         }
     }
     return candidates;
+};
+
+// The form the host handed over when no token was found: types, field names and lengths, never a value.
+const responseShape = (value, depth = 0) => {
+    if (Array.isArray(value)) {
+        return depth > 2 ? `array[${value.length}]` : `array[${value.length}](${value.slice(0, 3).map((item) => responseShape(item, depth + 1)).join(',')})`;
+    }
+    if (value && typeof value === 'object') {
+        const keys = Object.keys(value);
+        if (depth > 2) return `object{${keys.length}}`;
+        return `{${keys.slice(0, 12).map((key) => (/^[A-Za-z_]{1,40}$/.test(key) ? `${key}:${responseShape(value[key], depth + 1)}` : '?')).join(',')}}`;
+    }
+    return value === null ? 'null' : typeof value === 'string' ? `string(${value.length})` : typeof value;
 };
 
 export const extractTriggerUrl = (toolResponse) => {
@@ -405,12 +421,15 @@ const processHookEventAuthoritative = async (event, { env = process.env, nowMs =
     const sessionId = event.session_id ?? event.sessionId;
     if (eventName === 'PostToolUse' && REMOTE_BROWSER_JOB_TOOL.test(toolName)) {
         try {
-            const triggerUrl = extractTriggerUrl(event.tool_response ?? event.toolResponse);
+            const toolResponse = event.tool_response ?? event.toolResponse;
+            const triggerUrl = extractTriggerUrl(toolResponse);
             if (triggerUrl === null) {
-                throw new HandoffError(
+                const error = new HandoffError(
                     'HANDOFF_TOKEN_NOT_FOUND',
                     'The browser authorization result did not contain a usable token.'
                 );
+                error.details = { responseShape: responseShape(toolResponse).slice(0, 400) };
+                throw error;
             }
             await stageTriggerUrl({
                 dataDirectory: resolveStoreDirectory(env),

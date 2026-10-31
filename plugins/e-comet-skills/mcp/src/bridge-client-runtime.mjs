@@ -311,6 +311,8 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 }
             }
             await refresh();
+            // Accepted residual "A broker that appears during the failure path reads as not visible":
+            // docs/local-agent-architecture.md#accepted-residuals.
             return connections.extensionReady ? { ok: true } : { ok: false, ...cause() };
         },
 

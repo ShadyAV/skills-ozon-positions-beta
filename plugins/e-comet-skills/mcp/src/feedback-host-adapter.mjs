@@ -96,9 +96,10 @@ const messages = {
     prepare_e_comet_feedback: 'The host feedback preparation result is unavailable. Do not authorize or submit feedback from this result.',
 };
 
-// `extensionLogText` is the device's extension-log.json for the cloud archive, already redacted and cut. The cloud
-// PostToolUse replaces this answer; see the accepted residual "Cowork carries a trimmed extension log".
-export const feedbackHostResultUnavailable = (targetTool, marker, bridgeStatus, extensionLogText = undefined) => ({
+// `extensionLog.text` is the device's extension-log.json for the cloud archive, already redacted and cut;
+// `extensionLog.trimmed` says the device left rows out, so the cloud metadata says so too. The cloud PostToolUse
+// replaces this answer; see the accepted residual "Cowork carries a trimmed extension log".
+export const feedbackHostResultUnavailable = (targetTool, marker, bridgeStatus, /** @type {{ text?: string, trimmed?: boolean } | undefined} */ extensionLog = undefined) => ({
     ok: false,
     status: 'host_result_unavailable',
     adapter: {
@@ -108,7 +109,8 @@ export const feedbackHostResultUnavailable = (targetTool, marker, bridgeStatus, 
         targetTool,
     },
     bridgeStatus,
-    ...(extensionLogText === undefined ? {} : { extensionLog: extensionLogText }),
+    ...(extensionLog?.text === undefined ? {} : { extensionLog: extensionLog.text }),
+    ...(extensionLog?.trimmed === true ? { extensionLogTrimmed: true } : {}),
     error: {
         code: 'FEEDBACK_HOST_RESULT_UNAVAILABLE',
         message: messages[targetTool],
@@ -126,7 +128,9 @@ const isExtensionLogText = (value) => {
 export const isValidFeedbackHostAdapterResult = (targetTool, marker, value) => {
     if (!messages[targetTool] || !record(marker) || marker.version !== FEEDBACK_HOST_ADAPTER_VERSION) return false;
     if (!record(value) || value.ok !== false || value.status !== 'host_result_unavailable') return false;
-    if (Object.keys(value).length !== (Object.hasOwn(value, 'extensionLog') ? 6 : 5) || (Object.hasOwn(value, 'extensionLog') && !isExtensionLogText(value.extensionLog))) return false;
+    const optional = ['extensionLog', 'extensionLogTrimmed'].filter((key) => Object.hasOwn(value, key)).length;
+    if (Object.keys(value).length !== 5 + optional || (Object.hasOwn(value, 'extensionLog') && !isExtensionLogText(value.extensionLog))
+        || (Object.hasOwn(value, 'extensionLogTrimmed') && value.extensionLogTrimmed !== true)) return false;
     if (!record(value.adapter) || Object.keys(value.adapter).length !== 4 || value.adapter.version !== FEEDBACK_HOST_ADAPTER_VERSION
         || value.adapter.operationId !== marker.operationId || value.adapter.nonce !== marker.nonce || value.adapter.targetTool !== targetTool) return false;
     if (!isValidFeedbackDeviceSnapshot(value.bridgeStatus)) return false;

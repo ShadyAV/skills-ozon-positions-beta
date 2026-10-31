@@ -18,6 +18,7 @@ export const countRunProgress = (total, unit) => {
 
 // Each run's handler answers to an opaque object key instead of the request id, so a client reusing that id after a
 // "running" answer never has its new request captured.
+// Accepted residual "Long bridge jobs hand over to e_comet_run_result after 30 s": docs/local-agent-architecture.md#accepted-residuals.
 export const createRunRegistry = ({ now = Date.now, randomUUID, waitMs = RUN_WAIT_MS, retentionMs = RUN_RESULT_RETENTION_MS }) => {
     const runs = new Map();
     const runsByKey = new WeakMap();
@@ -28,6 +29,7 @@ export const createRunRegistry = ({ now = Date.now, randomUUID, waitMs = RUN_WAI
         const run = {
             runId: randomUUID(), tool, startedAt: now(), meter: {}, finished: new Promise((resolve) => { resolveFinished = resolve; }),
         };
+        // Accepted residual "A run that never settles answers running until restart": docs/local-agent-architecture.md#accepted-residuals.
         run.finish = (outcome) => {
             if (run.outcome) return;
             run.outcome = outcome;

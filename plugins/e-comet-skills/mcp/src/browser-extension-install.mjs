@@ -242,6 +242,7 @@ export const probeBrowserExtensionInstall = async (/** @type {any} */ { observed
     profilePaths } = {}) => {
     const base = { check: 'extension_install', observedAt: observedAt ?? new Date(now()).toISOString(), source: 'browser_profile_metadata', executionPlane: 'device' };
     const join = platform === 'win32' ? win32.join : posix.join;
+    // Accepted residual "A clock stepped forward after boot hides a running browser": docs/local-agent-architecture.md#accepted-residuals.
     const bootMs = now() - uptime() * 1000;
     const browsers = [];
     let cause;

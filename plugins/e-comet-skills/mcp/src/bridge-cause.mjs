@@ -224,8 +224,11 @@ const logCause = (log, { since, started, entries, failureRecords, lastConnect, n
     // A streak of not-found or forbidden closes writes one row, its first. While it stays open in this run of the browser,
     // it is current once the registration had stayed unchanged longer than the extension's 15 s search interval when the
     // log was read: status keeps a read, and a later clock would settle a streak no search was seen to leave open.
+    // Accepted residual "BRIDGE_HOST_NOT_FOUND and the settled FORBIDDEN arm assume the extension's worker stays alive":
+    // docs/local-agent-architecture.md#accepted-residuals.
     const settledStreak = log.streak?.open && close?.atMs > started && (log.readAtMs ?? now) - since >= HOST_NOT_FOUND_SETTLE_MS;
     if (settledStreak && close.class === 'host_forbidden') return { code: 'BRIDGE_HOST_FORBIDDEN' };
+    // Accepted residual "A settled not-found streak outranks an unread policy": docs/local-agent-architecture.md#accepted-residuals.
     if (settledStreak && close.class === 'host_not_found') return { code: 'BRIDGE_HOST_NOT_FOUND' };
     // Accepted residual "A security program that removes a connector file": docs/local-agent-architecture.md#accepted-residuals.
     if (close && START_FAILURE_CLASSES.has(close.class) && !close.handshaken && close.atMs > Math.max(since, started)

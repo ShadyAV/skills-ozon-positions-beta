@@ -109,7 +109,8 @@ const FETCH_GUIDANCE = Object.freeze({
     'SELLER_STATE_UNAVAILABLE:storage_failed': 'The extension could not read or write its seller restoration state. No new seller operation was dispatched. ' +
         `Ask the user to restart the browser, ${AUTHORIZE_REMAINING} If it repeats, offer to report it.`,
     // The extension reads the tokens from the page's storage, whose keys Wildberries has renamed before (2026-09-17): a
-    // reason that survives a reload and a sign-in is ours.
+    // reason that survives a reload and a sign-in is ours. Accepted residual "A reasonless SELLER_AUTH_UNAVAILABLE gets no
+    // step": docs/local-agent-architecture.md#accepted-residuals.
     'SELLER_AUTH_UNAVAILABLE:access_token_missing': `The Wildberries seller portal tab has no readable access token. ${SELLER_SIGN_IN_STEP}`,
     'SELLER_AUTH_UNAVAILABLE:seller_token_missing': `The Wildberries seller portal tab has no readable seller token. ${SELLER_SIGN_IN_STEP}`,
     'SELLER_AUTH_UNAVAILABLE:both_missing': `The Wildberries seller portal tab has no readable sign-in data. ${SELLER_SIGN_IN_STEP}`,
@@ -122,6 +123,7 @@ const FETCH_GUIDANCE = Object.freeze({
 export const fetchFailureGuidance = (code, details) => FETCH_GUIDANCE[`${code}:${details?.phase ?? details?.reason}`];
 
 // A capability the connected extension lacks while a downloaded update waits: the store cannot help, a restart can.
+// Accepted residual "The downloaded-update step does not compare versions": docs/local-agent-architecture.md#accepted-residuals.
 export const withPendingUpdate = (error, pendingUpdateVersion) => {
     const end = error.message.indexOf('. ');
     error.message = `${end < 0 ? error.message : error.message.slice(0, end + 1)} The extension update ${pendingUpdateVersion} is already ` +

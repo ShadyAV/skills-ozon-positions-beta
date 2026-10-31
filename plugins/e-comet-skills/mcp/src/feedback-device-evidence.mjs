@@ -118,6 +118,7 @@ export const feedbackExtensionLog = (rows, { includeTranscript, maxBytes, connec
         .map((row, index) => ({ index, group: connectionFirst && row?.requestId !== CONNECTION_ROWS ? 1 : 0, text: archivedRow(row) }));
     const kept = [];
     let size = 2;
+    // Accepted residual "An oversized extension-log row drops the Cowork log unflagged": docs/local-agent-architecture.md#accepted-residuals.
     for (const item of [...candidates].sort((a, b) => a.group - b.group || b.index - a.index)) {
         size += Buffer.byteLength(item.text, 'utf8') + (kept.length ? 1 : 0);
         if (size > maxBytes) break;
@@ -130,7 +131,8 @@ export const feedbackExtensionLog = (rows, { includeTranscript, maxBytes, connec
 
 /**
  * The log rows, read within the evidence deadline. A reader that is missing, throws or hangs gives none: the report is
- * never lost to the evidence gathered for it.
+ * never lost to the evidence gathered for it. Accepted residual "A failed extension-log read looks like an empty log":
+ * docs/local-agent-architecture.md#accepted-residuals.
  * @param {{ readExtensionLogRows?: () => Promise<{ rows?: unknown }>, timeoutMs?: number }} options
  * @returns {Promise<unknown>}
  */

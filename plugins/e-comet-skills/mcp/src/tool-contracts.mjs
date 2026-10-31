@@ -57,6 +57,7 @@ const reportDeliveryGuidance =
     'Use the exact returned resource_link.uri or artifact.path: name is a display name and may differ from the stored filename. ' +
     'If opening fails, check that exact file with the host file capability that can access the MCP host filesystem. An empty filename search, an unavailable resource listing, or an Excel opening error does not prove deletion or retention cleanup. ' +
     'When the file exists, recover delivery through the host file capability using the same workbook; if a copy is needed, preserve the original and verify the copy against the returned size and SHA-256. ' +
+    'ARTIFACT_REJECTED with details.class says why the local workbook write failed: limit means the job\'s workbooks exceed the per-job storage limit, so split it into smaller jobs on the user\'s decision; disk carries details.systemCode, read as for LOCAL_STORAGE_FAILED; integrity and format are e-Comet defects to report. ' +
     'Do not recreate a completed report because opening or reading its downloaded workbook failed. If the exact file cannot be checked from this host, report that verification gap without claiming the file is missing. ';
 
 export const BRIDGE_FAILURE_GUIDANCE =
@@ -73,6 +74,7 @@ const localBridgeFailureGuidance =
 
 const rejectionAndHandoffGuidance =
     'BROWSER_JOB_HANDOFF_REQUIRED (stage handoff) means this tool ran without hook-injected authorization: the host hook did not run or did not rewrite the input, because the plugin hooks are not trusted, are disabled, changed after a plugin update, or the host does not run plugin hooks in this task. It is not a marketplace, extension or account failure. Do not call browser_job or this tool again until that is resolved; each repeat spends one signed authorization. On Codex run e_comet_diagnose with installation scope, safe_probes and the hook_permissions probe and follow its result: on disabled or review_required ask the user to enable and trust all e-Comet handlers at once in Settings → Plugins → Personal → e-Comet MCP Tools → Hooks, not only the ones this task needs (Codex asks again after every plugin update), on ready or not_checked the cause is not established; on Claude Code /hooks lists the configured hooks; in Claude with mcp__remote-devices__... tool names, if no shell command had run in this conversation, its sandbox and hooks had not started: run one no-op shell command (true), then call browser_job once and this tool once; a new task starts without the sandbox again; otherwise verify that the plugin is installed and enabled in Customize → Plugins → Yours. retryable:true never authorizes an automatic repeat. ' +
+    'A HANDOFF_TOKEN_NOT_FOUND hook error beside the browser_job result means the hook found no authorization in the result the host handed it; the HANDOFF_MISSING this tool then answers follows from it, not from the call order. Do not repeat browser_job: offer to report, with the responseShape it names. ' +
     'A whole-call BROWSER_JOB_REJECTED or BROWSER_JOB_ACCOUNT_MISMATCH (for Ozon tools, OZON_AUTHORIZATION_REJECTED with the same details) carries details.browserJobRejection.reason: ecomet_not_authenticated means the extension is not activated, and the user activates it with the API key from the e-Comet account (https://app.e-comet.io/account) in the browser where it is connected; subject_mismatch (code BROWSER_JOB_ACCOUNT_MISMATCH) means the extension is activated with a different e-Comet account than the connector, and the user uses the same account on both; expired or token_reuse need one fresh browser_job on the user\'s decision; for device_clock_ahead, device_clock_behind and storage_unavailable the message names the user\'s step (sync the clock, restart the browser), then one fresh browser_job on the user\'s decision; user_not_available: the user checks the extension\'s activation with the API key, then one fresh browser_job on the user\'s decision, and a repeat is reported; every other reason is an e-Comet defect to report, not a user change. See the packaged mcp/DIAGNOSTICS.md section "Missing authorization handoff". ';
 
 const buyerOutcomeGuidance =
@@ -156,6 +158,7 @@ const sellerReviewsContract =
             'SELLER_AUTH_UNAVAILABLE with reason access_token_missing, seller_token_missing or both_missing: the user reloads the seller portal tab and signs in if it asks, then one fresh browser_job on the user\'s decision; the same reason again, header_too_long or reader_failed is an e-Comet defect to report, never repeated. ' +
             'stopReason "unrecognized_response" with SELLER_RESPONSE_INVALID: WB answered the report status in a shape e-Comet does not recognize; no user step, an e-Comet defect to report, never repeated. ' +
             'Max 50 exports/100 reports, 100 MiB/XLSX, 500 MiB/job. ' +
+            'JOB_ARTIFACT_QUOTA_EXCEEDED: the job\'s workbooks passed 500 MiB; split it into smaller exports, each with its own browser_job on the user\'s decision. ' +
             'Artifacts retained for 24 hours, never evicted by another export. ' +
             'Return all resource links; summarize complete/failed/skipped. ' +
             'Empty workbook cannot establish ownership. ' +
@@ -252,6 +255,13 @@ const runningAnswerGuidance =
     'Tell the user its progress in one line, then call e_comet_run_result with that runId, again while it answers running; it returns this tool\'s own final answer, read by this contract. ' +
     'RUN_RESULT_UNAVAILABLE means the outcome is unknown: tell the user, and call this tool again only if the user asks.';
 
+// Failures any signed tool can end with, each with the step its message names.
+const authorizationEndGuidance =
+    'BROWSER_JOB_REAUTHORIZATION_REQUIRED names in details.reason why the authorization ended: expired means the job outlasted one authorization, so split the remaining work into smaller jobs, each with its own browser_job on the user\'s decision; released or route_changed need one fresh browser_job on the user\'s decision. ' +
+    'BROWSER_JOB_DESCRIPTOR_INVALID (details.rule; for Ozon tools OZON_AUTHORIZATION_REJECTED with details.rule) and BROWSER_JOB_LEASE_INVALID are e-Comet defects with no user step: offer to report, and never request another authorization for the same job. ' +
+    'When a missing-capability message says the extension update is already downloaded, the user restarts the browser or applies the update on app.e-comet.io, then one fresh browser_job on the user\'s decision.';
+
+// Accepted residual "Opting out of history still sends the connection rows": docs/local-agent-architecture.md#accepted-residuals.
 export const feedbackToolContract = String.raw`# Send feedback to e-Comet
 
 Use the remote \`report_issue\` tool together with the local \`prepare_e_comet_feedback\` and \`submit_e_comet_feedback\` tools. This is an externally mutating workflow: preserve the user's consent and resolved history choice through every recovery step.
@@ -293,6 +303,8 @@ Call \`report_issue\` at most once per prepared artifact. Call it again only whe
 The service allows five authorizations per hour. On a \`report_issue\` rate-limit error, the prepared report stays valid for 24 hours: say «Лимит отправки отчётов исчерпан, попробуйте позже.», do not prepare or send it again, and do not retry \`report_issue\` automatically.
 
 \`FEEDBACK_GRANT_MISSING\` is a denial by a running hook, not evidence that hooks are disabled or untrusted, and this submit was blocked before upload. If no earlier upload was attempted, say «Отчёт не отправлен: не получено разрешение на загрузку.» If \`report_issue\` was skipped, no earlier upload is uncertain, and consent remains valid, obtain its grant once and continue with the same prepared artifact and history choice; do not repeat consent or recreate the archive. If \`report_issue\` already ran, inspect its result and handoff evidence; missing grant state alone does not authorize repeating it.
+
+\`FEEDBACK_TRANSCRIPT_UNAVAILABLE\` on preparation means this host gives plugins no session history: nothing was prepared or sent. Ask the user once whether to prepare the report without history; never retry with history.
 
 Explain failures only from the fixed safe message and supplied closed \`error.details.operation\`, \`reason\`, \`systemCode\`, and \`httpStatus\`. An optional source module and line are public-code investigation context, not a user path or proven cause. Unknown internal errors remain unknown. A trusted-hook denial does not authorize changing consent, history choice, or hook trust. \`status:"not_started"\` confirms that call did not upload; follow its current reason and action without describing it as possibly sent, while preserving any separate earlier uncertainty.
 
@@ -358,6 +370,6 @@ export const describeToolContract = (name) => {
         type: 'e_comet_tool_contract',
         requestedTool: name,
         appliesTo: ['browser_job', name],
-        contract: `${signedContracts[name].trimEnd()} ${runningAnswerGuidance}`,
+        contract: `${signedContracts[name].trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
     };
 };

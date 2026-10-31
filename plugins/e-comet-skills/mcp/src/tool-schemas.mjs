@@ -1076,6 +1076,7 @@ const feedbackPrepareHostUnavailableSchema = object(
         }, ['version', 'operationId', 'nonce', 'targetTool']),
         bridgeStatus: feedbackDeviceSnapshotSchema,
         extensionLog: { type: 'string', maxLength: FEEDBACK_CLOUD_EXTENSION_LOG_MAX_BYTES },
+        extensionLogTrimmed: { const: true },
         error: object({
             code: { const: 'FEEDBACK_HOST_RESULT_UNAVAILABLE' },
             message: feedbackMessage,

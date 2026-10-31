@@ -140,11 +140,12 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
 
 /** @typedef {(input: { reportBytes: Buffer, metadataBytes: Buffer, transcriptBytes?: Buffer, extensionLogBytes?: Buffer }, options: { maxBytes: number }) => Buffer | Promise<Buffer>} FeedbackZipCreator */
 
-// The device's text as the Cowork cloud hook delivers it: a JSON array the device already redacted and cut.
+// The device's text as the Cowork cloud hook delivers it: a JSON array the device already redacted and cut. Whether
+// the cut left rows out comes beside it (`extensionLogTrimmed`).
 const cloudExtensionLog = (/** @type {Buffer} */ bytes) => {
     try {
         const rows = Buffer.isBuffer(bytes) ? JSON.parse(bytes.toString('utf8')) : undefined;
-        return Array.isArray(rows) && rows.length > 0 ? { bytes, rows: rows.length, trimmed: false } : undefined;
+        return Array.isArray(rows) && rows.length > 0 ? { bytes, rows: rows.length } : undefined;
     } catch {
         return undefined;
     }
@@ -153,10 +154,10 @@ const cloudExtensionLog = (/** @type {Buffer} */ bytes) => {
 /**
  * Creates and stores an immutable feedback archive. transcriptPath is injected by the trusted host hook.
  * `dependencies` is an internal composition/test seam; production supplies getBridgeStatus and, on the device,
- * readExtensionLogRows (or, from the Cowork cloud hook, extensionLogBytes) and uses the validated built-in
- * persistence, ZIP, claim, clock, and runtime metadata functions.
+ * readExtensionLogRows (or, from the Cowork cloud hook, extensionLogBytes and extensionLogTrimmed: the device left
+ * rows out) and uses the validated built-in persistence, ZIP, claim, clock, and runtime metadata functions.
  * @param {{ kind?: string, summary?: string, details?: string, includeTranscript?: boolean, transcriptPath?: string, feedbackClaim?: string, feedbackSession?: string }} input
- * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number, route?: 'native' | 'cloud', readExtensionLogRows?: () => Promise<{ rows?: unknown }>, extensionLogBytes?: Buffer }} dependencies
+ * @param {{ getBridgeStatus?: () => unknown, registerArtifact?: typeof registerFeedbackArtifact, readTranscript?: (path: string, options: { maxBytes: number }) => Promise<Buffer>, verifySignature?: (request: { tool: string, sessionHash?: unknown, signature?: unknown, fields: Record<string, unknown> }) => unknown, createZip?: FeedbackZipCreator, now?: () => number, platform?: string, arch?: string, version?: string, maxBytes?: number, route?: 'native' | 'cloud', readExtensionLogRows?: () => Promise<{ rows?: unknown }>, extensionLogBytes?: Buffer, extensionLogTrimmed?: boolean }} dependencies
  */
 export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const {
@@ -174,6 +175,7 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
         route = 'native',
         readExtensionLogRows = undefined,
         extensionLogBytes = undefined,
+        extensionLogTrimmed: deviceLogTrimmed = false,
     } = dependencies;
     if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof verifySignature !== 'function' || typeof createZip !== 'function' || typeof now !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
         throw new TypeError('Feedback preparation dependencies are invalid');
@@ -239,7 +241,7 @@ export const prepareECometFeedback = async (input = {}, dependencies = {}) => {
     const transcriptIncluded = includeTranscript === true;
     let transcriptTruncated = false;
     let extensionLog = await extensionLogRead;
-    let extensionLogTrimmed = extensionLog?.trimmed === true;
+    let extensionLogTrimmed = extensionLog?.trimmed === true || deviceLogTrimmed === true;
     const serializeMetadata = (transcriptSizeBytes) => atOperation('metadata_encode', () => serializeFeedbackMetadata({
         createdAt, version, platform, arch, transcriptIncluded, transcriptSizeBytes,
         ...(transcriptTruncated ? { transcriptTruncated: true } : {}),

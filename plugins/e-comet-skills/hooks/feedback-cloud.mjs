@@ -219,7 +219,8 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
     // Uploads the staged archive once. Every refusal before the request keeps the authorization for a repeat.
     const upload = async (artifactId, transport) => {
         const recorded = await store.readArtifactOutcome(binding.sessionId, artifactId);
-        // Another call already started or ended this artifact's upload: its outcome answers this call too.
+        // Another call already started or ended this artifact's upload: its outcome answers this call too. Accepted
+        // residual "Overlapping cloud submits can drop the upload grant": docs/local-agent-architecture.md#accepted-residuals.
         if (blocksUpload(recorded)) return recorded.result;
         let artifact;
         try {
@@ -272,8 +273,9 @@ export const processCloudFeedbackEvent = async (event, options = {}) => {
                 verifySignature: () => true, now, route: 'cloud',
                 getBridgeStatus: () => response.bridgeStatus,
                 // The device's extension log, validated above as a bounded JSON array; the archive fit drops it
-                // before report.md or metadata.json.
+                // before report.md or metadata.json. Whether the device left rows out goes into metadata.json.
                 ...(response.extensionLog === undefined ? {} : { extensionLogBytes: Buffer.from(response.extensionLog, 'utf8') }),
+                ...(response.extensionLogTrimmed === true ? { extensionLogTrimmed: true } : {}),
                 registerArtifact: value => registerFeedbackArtifact(value, artifactOptions),
                 ...(options.cloud?.readTranscript ? { readTranscript: options.cloud.readTranscript } : {}),
             });

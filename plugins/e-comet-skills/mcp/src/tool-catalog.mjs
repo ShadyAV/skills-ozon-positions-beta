@@ -19,8 +19,8 @@ const feedbackContractTargets = FEEDBACK_CONTRACT_TOOL_NAMES.join(' or ');
 const signedContractTargets = SIGNED_CONTRACT_TOOL_NAMES.join(', ');
 
 const signedDiscovery = (name, type) =>
-    `If its complete contract is not already in the current task, call describe_e_comet_tool({name:"${name}"}) and await it before browser_job. ` +
-    `Then call browser_job once with the matching ${type} descriptor and, once it returns, this local tool exactly once, never in the same parallel step; do not insert discovery between them. ` +
+    `Unless its complete contract is already in this task, call describe_e_comet_tool({name:"${name}"}) and await it before browser_job. ` +
+    `Then call browser_job once with the matching ${type} descriptor and, after it returns, this local tool exactly once; do not insert discovery between them. ` +
     'Omit triggerUrl and trigger_url; the trusted hook injects authorization. Only for mcp__remote-devices__ tools pass the browser_job trigger_url yourself, unchanged, as triggerUrl. Never decode, print, edit, or expose it. ';
 
 const completeContractGuidance = 'Follow the returned complete contract for exact descriptors, defaults, fields and recovery.';

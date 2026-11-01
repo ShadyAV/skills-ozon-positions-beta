@@ -5,7 +5,7 @@ const coworkCopyStep =
     'Exception: if this tool is named mcp__remote-devices__..., the host refuses hook-changed arguments, so pass the browser_job result\'s trigger_url yourself, unchanged, as triggerUrl. ';
 
 const authorizationWorkflow =
-    'This typed local tool owns the workflow: select it based on user intent, then call the remote e-Comet browser_job exactly once with the matching typed job and immediately invoke this tool. ' +
+    'This typed local tool owns the workflow: select it based on user intent, then call the remote e-Comet browser_job exactly once with the matching typed job and invoke this tool as soon as browser_job returns, never in the same parallel step. ' +
     'In Claude Code and Codex, model-authored arguments must omit both triggerUrl and trigger_url so the trusted host hook can inject the transport-only authorization immediately before this local call. ' +
     coworkCopyStep +
     'Never decode, print, edit, or expose the authorization. Do not infer an authorization failure from client status: attempt the actual remote call and report only the confirmed error in user-friendly language. If a tool is missing from the catalog, repeat the host tool search up to three times; never repeat browser_job or this tool to make an error disappear. ';
@@ -25,7 +25,7 @@ const ozonPackageContext =
 
 const ozonAuthorizationWorkflow =
     ozonScopeGuard +
-    'This typed local tool owns the Ozon workflow. First call the remote browser_job({job:{type:"ozon_seller_promotion_report",dateFrom,dateTo}}) exactly once, then immediately invoke this tool with the same dates. ' +
+    'This typed local tool owns the Ozon workflow. First call the remote browser_job({job:{type:"ozon_seller_promotion_report",dateFrom,dateTo}}) exactly once, then invoke this tool with the same dates as soon as it returns, never in the same parallel step. ' +
     ozonHookInjection +
     'local_bridge_status reports legacy WB browser context and must not be used to gate this Ozon tool; the Ozon capability and typed operation result are authoritative. ' +
     'Its extension version and Ozon capability fields are informational only: use them to explain a failure, never to skip or pre-approve this call. ';
@@ -143,7 +143,7 @@ const recommendationsContract =
 
 const sellerReviewsContract =
             'Original WB seller-review XLSX. ' +
-            'Call remote browser_job once: job {type:"seller_reviews",exports:[{product_id?:int,dateFrom?,dateTo?,isAnswered?:bool,ratings?:[1|2|3|4|5,...],content?},...],org?}, then immediately this tool. ' +
+            'Call remote browser_job once: job {type:"seller_reviews",exports:[{product_id?:int,dateFrom?,dateTo?,isAnswered?:bool,ratings?:[1|2|3|4|5,...],content?},...],org?}, then this tool once it returns, never in the same parallel step. ' +
             'Trusted Claude Code/Codex hooks inject authorization: omit triggerUrl/trigger_url. ' + coworkCopyStep +
             'Never decode, print, edit or expose it. ' +
             'Never infer authorization failure from status. ' +

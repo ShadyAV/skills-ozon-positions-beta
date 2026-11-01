@@ -20,7 +20,7 @@ const signedContractTargets = SIGNED_CONTRACT_TOOL_NAMES.join(', ');
 
 const signedDiscovery = (name, type) =>
     `If its complete contract is not already in the current task, call describe_e_comet_tool({name:"${name}"}) and await it before browser_job. ` +
-    `Then call browser_job once with the matching ${type} descriptor and immediately this local tool exactly once; do not insert discovery between them. ` +
+    `Then call browser_job once with the matching ${type} descriptor and, once it returns, this local tool exactly once, never in the same parallel step; do not insert discovery between them. ` +
     'Omit triggerUrl and trigger_url; the trusted hook injects authorization. Only for mcp__remote-devices__ tools pass the browser_job trigger_url yourself, unchanged, as triggerUrl. Never decode, print, edit, or expose it. ';
 
 const completeContractGuidance = 'Follow the returned complete contract for exact descriptors, defaults, fields and recovery.';
@@ -41,7 +41,7 @@ const directMarketplaceGuidance =
 
 export const serverInstructions =
     directMarketplaceGuidance +
-    'Choose the typed local tool by intent; do not start with browser_job. For a selected signed tool, get its full contract via describe_e_comet_tool unless already in this task, before browser_job; then immediately call the local tool. For images, call wb_product_images directly. ' +
+    'Choose the typed local tool by intent; do not start with browser_job. For a selected signed tool, get its full contract via describe_e_comet_tool unless already in this task, before browser_job; call the local tool once browser_job returns, not in parallel. For images, call wb_product_images directly. ' +
     'Live WB stock/sizes/price/card/description/characteristics: wb_product_card; search ranking/top: wb_search_by_query; search filters: wb_filters_by_query; one article for queries: wb_check_by_query; recommendations: wb_recommendations_by_product; review export: wb_seller_reviews. Ozon promotion: ozon_seller_promotion_report (one) or ozon_seller_promotion_reports (package); analytics by period/day: ozon_seller_analytics_report; позиции/места товаров в поиске Ozon по фразам: ozon_search_positions. ' +
     proactiveFeedbackOffer + updateNoticeGuidance + hookDiagnosticGuidance +
     'If remote e-Comet tools are missing, ask the host or use codex_mcp_auth only in Codex before any authorization claim. ' +

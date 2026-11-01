@@ -526,7 +526,7 @@ and its trailing hook record carries the closed `cause` (and `systemCode` for a 
 
 | Hook denial | `cause` | Owner and action |
 | --- | --- | --- |
-| `HANDOFF_MISSING`, `HANDOFF_TOOL_MISMATCH` | `missing` | Agent flow: no authorization was waiting for this tool in this conversation. Call `browser_job` once for the intended tool, then the local tool without authorization fields. |
+| `HANDOFF_MISSING`, `HANDOFF_TOOL_MISMATCH` | `missing` | Agent flow: no authorization was waiting for this tool in this conversation. After a `HANDOFF_MISSING` from a local call made in the same parallel step as `browser_job`, retry the local tool alone once. Otherwise call `browser_job` once for the intended tool, then the local tool without authorization fields. |
 | `HANDOFF_EXPIRED` | `expired` | Agent flow: the waiting authorization outlived its 90 seconds. One fresh `browser_job` for that tool, then call the local tool right away. |
 | `HANDOFF_MODEL_AUTHORIZATION`, `HANDOFF_INVALID_INPUT` | `invalid_input` | Agent flow: the call itself carried `triggerUrl` or `trigger_url`, or arguments that are not an object; nothing was spent. Remove the field or fix the arguments and call the same local tool again, without a new `browser_job`. |
 | `HANDOFF_COPY_REQUIRED` | `invalid_input` | Agent flow, Cowork only: the device call lacked `triggerUrl`, and the host refuses arguments a hook changed; nothing was spent. Pass `trigger_url` from the same `browser_job` result, unchanged, as `triggerUrl` and call the same local tool again, without a new `browser_job`. |

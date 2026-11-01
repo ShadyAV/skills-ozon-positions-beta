@@ -52,7 +52,7 @@ const PROTOTYPE_SPECIAL_HEADER_NAMES = new Set(['__proto__', 'constructor', 'pro
 const LOCAL_FEEDBACK_TOOL =
     /^mcp__(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet[-_]local__(?:prepare_e_comet_feedback|submit_e_comet_feedback)$/;
 const REMOTE_REPORT_ISSUE_TOOL = new RegExp(
-    `^mcp__(?:e[-_]comet|e_comet_stage|https_mcp_(?:stage_int_)?e[-_]comet_io_mcp|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|${COWORK_UUID_NAMESPACE})__report_issue$`
+    `^mcp__(?:e[-_]comet|e_comet_stage|(?:claude_ai_)?https_mcp_(?:stage_int_)?e[-_]comet_io_mcp|plugin_e-comet-skills_e-comet|remote-devices__plugin_e-comet-skills_e-comet|${COWORK_UUID_NAMESPACE})__report_issue$`
 );
 
 const ownedErrors = new WeakMap();

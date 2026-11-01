@@ -43,10 +43,11 @@ const OWN_STATE_FILE = new RegExp(
 );
 
 class HandoffError extends Error {
-    constructor(code, message) {
+    constructor(code, message, recovery) {
         super(message);
         this.name = 'HandoffError';
         this.code = code;
+        this.recovery = recovery;
     }
 }
 
@@ -213,7 +214,9 @@ export const claimTriggerUrl = async ({
         candidates.push(name);
     }
     if (candidates.length === 0) {
-        throw new HandoffError('HANDOFF_MISSING', 'No browser authorization is waiting for this conversation.');
+        // browser_job stages its authorization only after it returns, so a local call issued beside it finds none yet.
+        throw new HandoffError('HANDOFF_MISSING', 'No browser authorization is waiting for this conversation.',
+            'If browser_job ran in the same parallel step as this call, retry this local tool alone once, without a new browser_job; otherwise call browser_job once for the intended local tool, then retry without model-authored authorization fields.');
     }
     if (candidates.length > 1) {
         // Authorizations are sequential, so two waiting ones cannot both be the intended job. Neither is
@@ -371,7 +374,7 @@ const deniedPreToolUseOutput = (error) =>
             permissionDecision: 'deny',
             permissionDecisionReason:
                 `${error.code}: e-Comet could not safely hand off the browser authorization. ${error.message} ` +
-                (handoffStorageRecovery(error.details) ?? handoffRecovery(error.code)) + (error.details ? ` Diagnostics: ${JSON.stringify(error.details)}` : ''),
+                (handoffStorageRecovery(error.details) ?? error.recovery ?? handoffRecovery(error.code)) + (error.details ? ` Diagnostics: ${JSON.stringify(error.details)}` : ''),
         },
     });
 

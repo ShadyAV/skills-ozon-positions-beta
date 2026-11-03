@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import net from 'node:net';
-import { release } from 'node:os';
+import { homedir, release } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pruneArtifacts } from './storage/writers/artifacts.mjs';
@@ -195,6 +195,12 @@ const getBridgeStatus = (metadata = {}) => {
         },
     });
 };
+// Verified workbook copies go to the Claude project. Cowork runs one device process for all its conversations, with
+// CLAUDE_PLUGIN_ROOT but no project, so its copies go to Documents, a folder its agent may request access to; the
+// plugin's own storage is never that folder (owner's choice, 2026-11-03). Codex and DeepSeek read the original paths.
+// ponytail: home/Documents, not the Windows known-folder lookup; a redirected Documents gets a plain folder beside it.
+const reportOutputDirectory = process.env.CLAUDE_PROJECT_DIR
+    ?? (process.env.CLAUDE_PLUGIN_ROOT ? join(homedir(), 'Documents') : undefined);
 const handleMcpMessage = createMcpMessageHandler({
     contracts: TOOL_CONTRACTS,
     instructions: SERVER_INSTRUCTIONS,
@@ -220,14 +226,14 @@ const handleMcpMessage = createMcpMessageHandler({
             ensureBroker: () => runtime.ensureBroker(),
             requestBrowserJobAuthorization,
             sellerOperations: createSellerOperations({ correlation: requestBroker.correlation }),
-            reportOutputDirectory: process.env.CLAUDE_PROJECT_DIR,
+            reportOutputDirectory,
         }), ...ozonSellerTools(registry, {
             getBridgeStatus,
             ensureBroker: () => runtime.ensureBroker(),
             requestBrowserJobAuthorization,
             ozonPromotion,
             ozonPackage,
-            reportOutputDirectory: process.env.CLAUDE_PROJECT_DIR,
+            reportOutputDirectory,
         })],
     getBridgeStatus,
     // Discovery and registration start once the host has its handshake answer, so neither delays it.

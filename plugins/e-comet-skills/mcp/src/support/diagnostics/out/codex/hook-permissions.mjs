@@ -76,7 +76,9 @@ export const summarizeCodexHooks = (result, cwd, inspector = 'transient_config_r
         return { state: 'unknown', cause: 'unsupported', facts: { ...base, status: 'unsupported' } };
     return { state: 'passed', facts: { ...base, status: 'ready' } };
 };
-export const collectCodexHookPermissions = async ({ cwd = process.cwd(), observedAt, now = Date.now, timeoutMs = 5_000, spawnProcess = spawn } = {}) => {
+// A cold `hooks/list` measured 5.5-9.7 s in Codex Desktop; a 5 s kill also kept it from ever warming. 20 s matches the
+// sibling `codex mcp list` probe; feedback preparation passes its own shorter deadline.
+export const collectCodexHookPermissions = async ({ cwd = process.cwd(), observedAt, now = Date.now, timeoutMs = 20_000, spawnProcess = spawn } = {}) => {
     let result;
     try {
         result = await queryCodexAppServer({ args: ['--stdio'], method: 'hooks/list', params: { cwds: [cwd] }, timeoutMs,

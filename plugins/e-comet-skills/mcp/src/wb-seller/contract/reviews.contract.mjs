@@ -63,7 +63,8 @@ const sellerReviewsContract = 'Original WB seller-review XLSX. ' +
     'Empty workbook cannot establish ownership. ' +
     'Never auto-retry rate limits/uncertain creates. ' +
     'Project output gets verified e-comet-reports copies; fileDelivery.stage/reason/systemCode diagnose delivery. ' +
-    'Cowork without a project: copies in Documents/e-comet-reports; read them via device_request_folder_access to that folder. ' +
+    'Cowork without a project: copies in Documents/e-comet-reports; ask the user to allow that folder, then device_request_folder_access it (auto mode refuses unrequested access). ' +
+    'Workbooks declare a one-cell sheet range: read every row (openpyxl without read_only). ' +
     'Never mount Cowork internal storage. ' +
     'Use exact resource_link.uri/artifact.path, not name. ' +
     'Opening/search/listing failure cannot prove deletion: check exact file via host filesystem capability; if uncheckable, report verification gap. ' +

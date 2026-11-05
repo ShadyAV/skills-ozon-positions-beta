@@ -1,10 +1,10 @@
-import { array, nonNegativeInteger, object, objectUnion } from '../../transport/mcp/schema.mjs';
-import { browserJobRejectionDetailsSchema, closedValue, fileDeliverySchema } from '../../transport/mcp/results.mjs';
+import { MAX_OZON_REPORT_PACKAGE_ITEMS, OZON_PACKAGE_STOP_REASONS } from '../domain/constants/limits.const.mjs';
 import { BRIDGE_CODES } from '../../transport/diagnostics/bridge-codes.mjs';
 import { ARTIFACT_FAILURE_CLASSES, DESCRIPTOR_RULES } from '../../transport/failures/vocabulary.mjs';
 import { MAX_BROWSER_JOB_TOKEN_BYTES } from '../../transport/mcp/limits.mjs';
-import { MAX_OZON_REPORT_PACKAGE_ITEMS, OZON_PACKAGE_STOP_REASONS } from '../domain/constants/limits.const.mjs';
 import { coworkCopyStep } from '../../transport/mcp/prose.mjs';
+import { browserJobRejectionDetailsSchema, closedValue, fileDeliverySchema } from '../../transport/mcp/results.mjs';
+import { array, nonNegativeInteger, object, objectUnion } from '../../transport/mcp/schema.mjs';
 // What the Ozon tools' contracts share: the trigger input, dates, artifacts and errors of a report, the package result,
 // the preflight refusal and the Ozon workflow prose.
 // An Ozon authorization failure carries either the extension's rejection or, when no broker answered, the bridge cause,
@@ -34,16 +34,25 @@ export const localStorageUnavailableSchema = object({
     stage: { const: 'storage' },
     retryable: { const: false },
 }, ['code', 'message', 'stage', 'retryable']);
-const ozonExecutionInterruptionDetailsSchema = objectUnion(object({ phase: { type: 'string', enum: ['pre_create', 'create_dispatched'] }, createOutcome: { const: 'not_started' } }, ['phase', 'createOutcome']), object({ phase: { const: 'create_settled' }, createOutcome: { const: 'confirmed' } }, ['phase', 'createOutcome']), object({ phase: { type: 'string', enum: ['polling', 'downloading', 'streaming'] },
-    createOutcome: { type: 'string', enum: ['not_started', 'confirmed'] } }, ['phase', 'createOutcome']));
+const ozonExecutionInterruptionDetailsSchema = objectUnion(object({ phase: { type: 'string', enum: ['pre_create', 'create_dispatched'] }, createOutcome: { const: 'not_started' } }, [
+    'phase',
+    'createOutcome',
+]), object({ phase: { const: 'create_settled' }, createOutcome: { const: 'confirmed' } }, ['phase', 'createOutcome']), object({
+    phase: { type: 'string', enum: ['polling', 'downloading', 'streaming'] },
+    createOutcome: { type: 'string', enum: ['not_started', 'confirmed'] },
+}, ['phase', 'createOutcome']));
 export const ozonPackageError = (codeStages, analytics = false) => objectUnion(...Object.entries(codeStages).map(([code, stage]) => object({
     code: { const: code },
     message: { type: 'string', minLength: 1, maxLength: 500 },
     stage: { const: stage },
     retryable: { const: false },
-    ...(analytics && code === 'REPORT_TERMINAL_FAILURE' ? { details: object({
-            marketplaceErrorCode: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
-        }, ['marketplaceErrorCode']) } : {}),
+    ...(analytics && code === 'REPORT_TERMINAL_FAILURE'
+        ? {
+            details: object({
+                marketplaceErrorCode: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
+            }, ['marketplaceErrorCode']),
+        }
+        : {}),
     ...(code === 'OZON_EXECUTION_INTERRUPTED' ? { details: ozonExecutionInterruptionDetailsSchema } : {}),
     ...(code === 'OZON_AUTHORIZATION_REJECTED' ? { details: ozonAuthorizationRejectedDetailsSchema } : {}),
     ...(code === 'ARTIFACT_REJECTED' ? { details: artifactRejectedDetailsSchema } : {}),
@@ -55,10 +64,21 @@ export const promotionPeriodFields = {
 export const packageItemSchemas = (fields, artifactSchema, errorSchema) => {
     fields = { ...fields, itemIndex: { type: 'integer', minimum: 0, maximum: MAX_OZON_REPORT_PACKAGE_ITEMS - 1 } };
     const requiredFields = Object.keys(fields);
-    const complete = object({ ...fields, status: { const: 'complete' }, artifact: artifactSchema }, [...requiredFields, 'status', 'artifact']);
+    const complete = object({ ...fields, status: { const: 'complete' }, artifact: artifactSchema }, [
+        ...requiredFields,
+        'status',
+        'artifact',
+    ]);
     const failed = object({ ...fields, status: { const: 'failed' }, error: errorSchema }, [...requiredFields, 'status', 'error']);
     const skipped = object({ ...fields, status: { const: 'skipped' } }, [...requiredFields, 'status']);
-    return { complete, failed, skipped, error: errorSchema, any: objectUnion(complete, failed, skipped), incomplete: objectUnion(failed, skipped) };
+    return {
+        complete,
+        failed,
+        skipped,
+        error: errorSchema,
+        any: objectUnion(complete, failed, skipped),
+        incomplete: objectUnion(failed, skipped),
+    };
 };
 export const packageResultSchema = (jobType, propertyName, itemSchemas) => {
     const result = (ok, statusValue, items, skipped = false, preexecution = false) => object({
@@ -98,7 +118,8 @@ export const ozonScopeGuard = 'e-Comet Ozon tools cover exactly three needs: Ozo
     'When the user asks for any other Ozon report or data (returns, finance, products, traffic, campaigns, orders), no e-Comet Ozon tool applies: ' +
     'do not call browser_job, do not substitute the nearest tool, and do not run any Ozon tool as a probe; say that only these three exist and ask what the user wants. ';
 export const ozonHookInjection = 'The trusted Claude Code or Codex host hook injects the opaque transport-only triggerUrl; model-authored arguments must omit both triggerUrl and trigger_url. ' +
-    coworkCopyStep + 'Never decode, print, edit, or expose that authorization. ';
+    coworkCopyStep +
+    'Never decode, print, edit, or expose that authorization. ';
 export const ozonPackageContext = 'The extension automatically uses the first ready Seller context and pins its company for this package; never ask the user to focus a tab. A fresh authorization uses the then-current context and does not guarantee the previous company. ' +
     'Do not use local_bridge_status to pre-approve or skip the signed operation; the family capability and typed operation result are authoritative. ';
 export const ozonHandoffGuidance = 'OZON_AUTHORIZATION_REJECTED with the message "The trusted browser-job hook did not provide Ozon authorization." is the same missing handoff; treat it exactly like BROWSER_JOB_HANDOFF_REQUIRED. ';

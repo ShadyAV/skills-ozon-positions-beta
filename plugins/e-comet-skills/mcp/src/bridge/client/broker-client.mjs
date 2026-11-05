@@ -1,5 +1,9 @@
+// The local MCP's side of the native bridge. It finds brokers through their rendezvous entries, proves an endpoint is
+// the broker that wrote the entry by the secret `brokerNonce` in its hello reply, and keeps one session until that
+// session closes. The nonce never leaves this module: not in entries it lists, log lines or session facts.
 import { join } from 'node:path';
-import { CLIENT_PROTOCOL_VERSION, MAX_FRAME_BYTES, MAX_HOST_TO_BROWSER_BYTES, createFrameReader, encodeFrame, } from '../../native-framing.mjs';
+import { CLIENT_PROTOCOL_VERSION, MAX_FRAME_BYTES, MAX_HOST_TO_BROWSER_BYTES, createFrameReader, encodeFrame } from '../../native-framing.mjs';
+import { isRecord } from '../../shared/values.mjs';
 const ENTRY_NAME = /^(\d+)\.json$/;
 const RECORD_NAME = /^(\d+)\.failed$/;
 // The two shapes `createEndpointPath` makes: a random local pipe, or a socket in a private `/tmp` directory from
@@ -11,7 +15,7 @@ const STALE_CONNECT_CODES = new Set(['ENOENT', 'ECONNREFUSED']);
 // The broker measures a client frame after adding its id prefix, and the prefix plus the id is at most 128 characters.
 const PREFIX_ALLOWANCE_BYTES = 128;
 // Parse boundary: rendezvous entries and broker frames are JSON another process wrote; a record is read field by field.
-const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const errorCode = (error) => (isRecord(error) ? error.code : undefined);
 const pidOf = (pattern, name) => {
     const pid = Number(pattern.exec(name)?.[1]);
     return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
@@ -23,13 +27,13 @@ const processGone = (pid) => {
         return false;
     }
     catch (error) {
-        return error?.code === 'ESRCH';
+        return errorCode(error) === 'ESRCH';
     }
 };
 export function isLocalEndpoint(endpoint, platform) {
     return typeof endpoint === 'string' && (platform === 'win32' ? PIPE_ENDPOINT : SOCKET_ENDPOINT).test(endpoint);
 }
-export function createBrokerClient({ rendezvousDir, platform, pluginVersion, instanceId, net, fs, now, log, connectTimeoutMs = 2000, helloTimeoutMs = 5000 }) {
+export function createBrokerClient({ rendezvousDir, platform, pluginVersion, instanceId, net, fs, now, log, connectTimeoutMs = 2000, helloTimeoutMs = 5000, }) {
     let current = null;
     let attempt = null;
     // The socket of the entry being tried, so stop() can end an attempt in flight.
@@ -49,12 +53,12 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
             return names;
         }
         catch (error) {
-            const code = error?.code ?? 'unknown';
+            const code = errorCode(error) ?? 'unknown';
             if (code === 'ENOENT')
                 directoryProblem = null;
             else if (code !== directoryProblem) {
                 directoryProblem = code;
-                log(`e-comet broker client: rendezvous not readable (${code})`);
+                log(`e-comet broker client: rendezvous not readable (${String(code)})`);
             }
             return [];
         }
@@ -72,7 +76,7 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
     };
     // Windows has no compare-and-delete: a broker that reuses the pid and renames its entry in between this re-read and
     // the rm loses that entry, and clients find it again only after its next start.
-    // Accepted residual "Stale-entry delete races a reused pid": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Stale-entry delete races a reused pid": docs/architecture/residuals/native-bridge.md.
     const removeIfUnchanged = async (name, raw) => {
         const path = join(rendezvousDir, name);
         try {
@@ -84,7 +88,12 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
         }
     };
     // Valid entries, newest start first. An unreadable entry or a foreign endpoint is no entry at all.
-    // Accepted residual "Several brokers: the most recently started is used": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Several brokers: the most recently started is used": docs/architecture/residuals/native-bridge.md.
+    const isUsableEntry = (entry) => isLocalEndpoint(entry.endpoint, platform) &&
+        typeof entry.brokerNonce === 'string' &&
+        entry.brokerNonce.length > 0 &&
+        typeof entry.startedAt === 'number' &&
+        Number.isFinite(entry.startedAt);
     const readEntries = async () => {
         const entries = [];
         for (const name of await readDirectory()) {
@@ -92,11 +101,9 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
             if (pid === null)
                 continue;
             const read = await readJson(name);
-            const entry = read?.value;
-            if (!entry || !isLocalEndpoint(entry.endpoint, platform) || typeof entry.brokerNonce !== 'string' ||
-                entry.brokerNonce.length === 0 || !Number.isFinite(entry.startedAt))
+            if (!read || !isUsableEntry(read.value))
                 continue;
-            entries.push({ pid, name, raw: read.raw, entry });
+            entries.push({ pid, name, raw: read.raw, entry: read.value });
         }
         return entries.sort((a, b) => b.entry.startedAt - a.entry.startedAt);
     };
@@ -148,11 +155,17 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
             onFrame: (frame) => {
                 if (socket.destroyed)
                     return;
-                if (session)
-                    return void (frameHandler ? frameHandler(frame) : queued.push(frame));
+                if (session) {
+                    if (frameHandler)
+                        frameHandler(frame);
+                    else
+                        queued.push(frame);
+                    return;
+                }
                 if (frame.type !== 'broker_hello' || frame.brokerNonce !== brokerNonce) {
                     socket.destroy();
-                    return void settle({ result: 'stale', detail: 'nonce mismatch' });
+                    settle({ result: 'stale', detail: 'nonce mismatch' });
+                    return;
                 }
                 const extension = isRecord(frame.extension) ? frame.extension : {};
                 session = {
@@ -163,7 +176,9 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
                     send: (message) => {
                         const encoded = encodeFrame(message);
                         if (encoded.readUInt32LE(0) + PREFIX_ALLOWANCE_BYTES > MAX_HOST_TO_BROWSER_BYTES) {
-                            throw Object.assign(new Error(`The frame is over the ${MAX_HOST_TO_BROWSER_BYTES}-byte browser limit.`), { code: 'FRAME_TOO_LARGE' });
+                            throw Object.assign(new Error(`The frame is over the ${MAX_HOST_TO_BROWSER_BYTES}-byte browser limit.`), {
+                                code: 'FRAME_TOO_LARGE',
+                            });
                         }
                         if (!socket.destroyed)
                             socket.write(encoded);
@@ -177,7 +192,7 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
                     },
                     brokerVersion: frame.brokerVersion,
                     brokerProtocolVersion: frame.clientProtocolVersion,
-                    browserContext: isRecord(frame.session) ? frame.session.browserContext ?? null : null,
+                    browserContext: isRecord(frame.session) ? (frame.session.browserContext ?? null) : null,
                     onFrame: (handler) => {
                         frameHandler = handler;
                         for (const early of queued.splice(0))
@@ -204,8 +219,10 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
         socket.on('data', (chunk) => reader.push(chunk));
         socket.on('close', () => {
             closed = true;
-            if (!session)
-                return void settle({ result: 'unresponsive', detail: 'closed before its hello reply' });
+            if (!session) {
+                settle({ result: 'unresponsive', detail: 'closed before its hello reply' });
+                return;
+            }
             if (current === session)
                 current = null;
             closeHandler?.();
@@ -213,8 +230,8 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
         socket.write(encodeFrame({ type: 'client_hello', clientProtocolVersion: CLIENT_PROTOCOL_VERSION, pluginVersion, instanceId }));
     });
     // Each outcome carries the line that describes it; the attempt decides whether to log it.
-    // Accepted residual "A hung newest broker costs a hello wait per attempt": docs/local-agent-architecture.md#accepted-residuals.
-    const tryEntry = async ({ pid, name, raw, entry }) => {
+    // Accepted residual "A hung newest broker costs a hello wait per attempt": docs/architecture/residuals/native-bridge.md.
+    const tryEntry = async ({ pid, name, raw, entry, }) => {
         const stale = async (why) => {
             await removeIfUnchanged(name, raw);
             return { result: 'stale', note: `entry of broker ${pid} is stale (${why})` };
@@ -232,7 +249,7 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
             return stale(outcome.detail);
         if (outcome.result === 'unresponsive')
             return { ...outcome, note: `broker ${pid} is unresponsive (${outcome.detail})` };
-        return { ...outcome, note: `connected to broker ${pid} (${entry.brokerVersion})` };
+        return { ...outcome, note: `connected to broker ${pid} (${String(entry.brokerVersion)})` };
     };
     const connectOnce = async () => {
         const candidates = await readEntries();
@@ -247,14 +264,15 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
             dialling = null;
             notes.push(`e-comet broker client: ${outcome.note}`);
             if (outcome.session && !stopped) {
-                current = outcome.session;
+                const session = outcome.session;
+                current = session;
                 lastSessionAtMs = now();
                 lastFailure = null;
                 for (const note of notes)
                     log(note);
                 // The one place a new session opens, so it reaches the handler exactly once whoever started the attempt.
-                onSession?.(current);
-                return { ok: true, session: current };
+                onSession?.(session);
+                return { ok: true, session };
             }
             outcome.session?.close();
             if (outcome.result === 'unresponsive')
@@ -281,13 +299,15 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
             return Promise.reject(stoppedError());
         if (current)
             return Promise.resolve({ ok: true, session: current });
-        attempt ??= connectOnce().finally(() => { attempt = null; });
+        attempt ??= connectOnce().finally(() => {
+            attempt = null;
+        });
         return attempt;
     };
     return {
         connect,
         listEntries,
-        // Accepted residual "Failure records pile up where no broker ever succeeds": docs/local-agent-architecture.md#accepted-residuals.
+        // Accepted residual "Failure records pile up where no broker ever succeeds": docs/architecture/residuals/native-bridge.md.
         /**
          * Failure records newer than the newest live entry, the manifest write and this process's last successful
          * session. Older ones are settled by a later start, a repair or a working session, so they are deleted.
@@ -301,12 +321,13 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
                 if (pid === null)
                     continue;
                 const read = await readJson(name);
-                if (!read || !Number.isFinite(read.value.at))
+                const at = read?.value.at;
+                if (!read || typeof at !== 'number' || !Number.isFinite(at))
                     continue;
-                if (read.value.at < cutoff)
+                if (at < cutoff)
                     await removeIfUnchanged(name, read.raw);
                 else
-                    records.push({ pid, name: read.value.name, code: read.value.code, at: read.value.at });
+                    records.push({ pid, name: read.value.name, code: read.value.code, at });
             }
             return records.sort((a, b) => b.at - a.at);
         },
@@ -314,7 +335,7 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
          * Re-lists the directory while no session is open. `onSession` receives every new session exactly once, whether
          * a tick or a connect() call opened it.
          */
-        startBackgroundDiscovery({ intervalMs = 5000, onSession: handler }) {
+        startBackgroundDiscovery({ intervalMs = 5000, onSession: handler, }) {
             if (discoveryTimer || stopped)
                 return;
             onSession = handler;
@@ -323,7 +344,7 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
                     return;
                 connect().catch((error) => {
                     if (!stopped)
-                        log(`e-comet broker client: discovery failed (${error?.code ?? error?.name ?? 'unknown'})`);
+                        log(`e-comet broker client: discovery failed (${String((isRecord(error) ? (error.code ?? error.name) : undefined) ?? 'unknown')})`);
                 });
             };
             discoveryTimer = setInterval(tick, intervalMs);
@@ -333,7 +354,7 @@ export function createBrokerClient({ rendezvousDir, platform, pluginVersion, ins
         /** Ends discovery, any attempt in flight and the open session. */
         stop() {
             stopped = true;
-            clearInterval(discoveryTimer);
+            clearInterval(discoveryTimer ?? undefined);
             discoveryTimer = null;
             dialling?.destroy();
             current?.close();

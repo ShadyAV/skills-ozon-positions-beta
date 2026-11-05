@@ -1,6 +1,6 @@
-import { FEEDBACK_KINDS, FeedbackHandoffError, fitPrepareWireInput, hasOwn, SUBMIT_TARGET_TOOL, validateRemoteInput, validateTranscriptPath, } from '../domain/policies/handoff.policy.mjs';
-import { handoffFailure } from '../domain/converters/denial.converter.mjs';
 import { isRecord } from '../../../shared/values.mjs';
+import { handoffFailure } from '../domain/converters/denial.converter.mjs';
+import { FeedbackHandoffError, isFeedbackKind, fitPrepareWireInput, SUBMIT_TARGET_TOOL, validateRemoteInput, validateTranscriptPath, } from '../domain/policies/handoff.policy.mjs';
 // The hook event names the transcript under one or both host spellings; the native adapter names its snapshot.
 const trustedTranscriptPath = (candidates) => {
     if (candidates.length === 0)
@@ -17,25 +17,27 @@ const trustedTranscriptPath = (candidates) => {
 // Parse boundary: the preparation's model-authored arguments, checked here.
 const prepareInputWithTrustedTranscript = ({ sessionId, toolInput, transcriptPaths }, { grants, results }) => {
     grants.validSession(sessionId);
-    if (!isRecord(toolInput) || !FEEDBACK_KINDS.has(toolInput.kind) || typeof toolInput.includeTranscript !== 'boolean') {
+    if (!isRecord(toolInput) || !isFeedbackKind(toolInput.kind) || typeof toolInput.includeTranscript !== 'boolean') {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_INPUT', 'The feedback preparation arguments are invalid.');
     }
-    if (hasOwn(toolInput, 'transcriptPath') ||
-        hasOwn(toolInput, 'transcript_path') ||
-        hasOwn(toolInput, 'feedbackClaim') ||
-        hasOwn(toolInput, 'feedback_claim') ||
-        hasOwn(toolInput, 'feedbackSession') ||
-        hasOwn(toolInput, 'feedback_session')) {
+    if (Object.hasOwn(toolInput, 'transcriptPath') ||
+        Object.hasOwn(toolInput, 'transcript_path') ||
+        Object.hasOwn(toolInput, 'feedbackClaim') ||
+        Object.hasOwn(toolInput, 'feedback_claim') ||
+        Object.hasOwn(toolInput, 'feedbackSession') ||
+        Object.hasOwn(toolInput, 'feedback_session')) {
         throw new FeedbackHandoffError('FEEDBACK_MODEL_TRANSPORT', 'Trusted feedback fields must not be supplied in model-authored input.');
     }
-    if (!results.isPrepareInput(toolInput)) {
+    const { summary, details } = toolInput;
+    // The input schema requires both texts.
+    if (!results.isPrepareInput(toolInput) || typeof summary !== 'string' || typeof details !== 'string') {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_INPUT', 'The feedback preparation arguments are invalid.');
     }
     const transcriptPath = trustedTranscriptPath(transcriptPaths);
     if (transcriptPath === undefined && toolInput.includeTranscript) {
         throw new FeedbackHandoffError('FEEDBACK_TRANSCRIPT_UNAVAILABLE', 'The trusted feedback transcript is unavailable.');
     }
-    return { ...toolInput, ...(transcriptPath === undefined ? {} : { transcriptPath }) };
+    return { ...toolInput, summary, details, ...(transcriptPath === undefined ? {} : { transcriptPath }) };
 };
 /**
  * The handoff steps around the feedback tools, for a hook and for the native adapter: sign the preparation, record the
@@ -44,37 +46,35 @@ const prepareInputWithTrustedTranscript = ({ sessionId, toolInput, transcriptPat
  * tools' results and the preparation input under their contracts.
  */
 export const createHandoffFlows = ({ grants, results }) => ({
-    authorizePrepare: async ({ sessionId, input, transcriptPaths, nowMs }) => {
+    authorizePrepare: async ({ sessionId, input, transcriptPaths }) => {
         try {
-            void nowMs;
             // Bind the fitted input's transcript path, never a path that will be rewritten later.
             const effectiveInput = fitPrepareWireInput(prepareInputWithTrustedTranscript({ sessionId, toolInput: input, transcriptPaths }, { grants, results }));
             const sign = await grants.loadSigner();
             const feedbackSession = grants.sessionHash(sessionId);
             const fields = effectiveInput.transcriptPath === undefined ? {} : { transcriptPath: effectiveInput.transcriptPath };
-            return { kind: 'allowed', input: {
+            return {
+                kind: 'allowed',
+                input: {
                     ...effectiveInput,
                     feedbackClaim: sign({ tool: 'prepare_e_comet_feedback', sessionHash: feedbackSession, fields }),
                     feedbackSession,
-                } };
+                },
+            };
         }
         catch (error) {
             return { kind: 'denied', failure: handoffFailure(error, 'handoff_prepare') };
         }
     },
-    capturePrepared: async ({ sessionId, input: authored, response, nowMs }) => {
-        // Parse boundary: the preparation's model-authored arguments, checked here.
-        const input = authored;
+    // Parse boundary: the preparation's model-authored arguments, checked here.
+    capturePrepared: async ({ sessionId, input, response, nowMs }) => {
         try {
             grants.validSession(sessionId);
-            if (!isRecord(input) ||
-                !FEEDBACK_KINDS.has(input.kind) ||
-                typeof input.includeTranscript !== 'boolean') {
+            if (!isRecord(input) || !isFeedbackKind(input.kind) || typeof input.includeTranscript !== 'boolean') {
                 throw new FeedbackHandoffError('FEEDBACK_INVALID_INPUT', 'The feedback preparation arguments are invalid.');
             }
             const metadata = results.preparedMetadata(response);
-            if (metadata.kind !== input.kind ||
-                metadata.transcriptIncluded !== input.includeTranscript) {
+            if (metadata.kind !== input.kind || metadata.transcriptIncluded !== input.includeTranscript) {
                 throw new FeedbackHandoffError('FEEDBACK_PREPARED_MISMATCH', 'The prepared feedback result does not match the requested report.');
             }
             await grants.stagePrepared({ sessionId, metadata, nowMs });
@@ -99,9 +99,8 @@ export const createHandoffFlows = ({ grants, results }) => ({
             return { kind: 'failed', failure: handoffFailure(error, 'handoff_authorize') };
         }
     },
-    authorizeSubmit: async ({ sessionId, input: authored, targetTool, nowMs }) => {
-        // Parse boundary: the submission's model-authored arguments, checked here.
-        const input = authored;
+    // Parse boundary: the submission's model-authored arguments, checked here.
+    authorizeSubmit: async ({ sessionId, input, targetTool, nowMs }) => {
         try {
             grants.validSession(sessionId);
             if (!isRecord(input)) {
@@ -116,11 +115,14 @@ export const createHandoffFlows = ({ grants, results }) => ({
             const transport = await grants.claimGrant({ sessionId, artifactId: input.artifactId, targetTool, nowMs });
             const effectiveInput = { ...input, ...transport };
             const feedbackSession = grants.sessionHash(sessionId);
-            return { kind: 'allowed', input: {
+            return {
+                kind: 'allowed',
+                input: {
                     ...effectiveInput,
                     feedbackClaim: sign({ tool: SUBMIT_TARGET_TOOL, sessionHash: feedbackSession, fields: effectiveInput }),
                     feedbackSession,
-                } };
+                },
+            };
         }
         catch (error) {
             return { kind: 'denied', failure: handoffFailure(error, 'handoff_submit') };

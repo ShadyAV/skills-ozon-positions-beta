@@ -1,7 +1,7 @@
 import { UUID_V4 } from '../../../shared/values.mjs';
 import { FEEDBACK_MESSAGE_MAX_LENGTH } from '../domain/constants/limits.const.mjs';
+import { FEEDBACK_DIAGNOSTIC_ERROR_TYPES, FEEDBACK_DIAGNOSTIC_MODULES, FEEDBACK_DIAGNOSTIC_OPERATIONS, FEEDBACK_DIAGNOSTIC_REASONS, FEEDBACK_DIAGNOSTIC_SYSTEM_CODES, } from '../../../transport/failures/evidence.mjs';
 import { object } from '../../../transport/mcp/schema.mjs';
-import { FEEDBACK_DIAGNOSTIC_ERROR_TYPES, FEEDBACK_DIAGNOSTIC_MODULES, FEEDBACK_DIAGNOSTIC_OPERATIONS, FEEDBACK_DIAGNOSTIC_REASONS, FEEDBACK_DIAGNOSTIC_SYSTEM_CODES } from '../../../transport/failures/evidence.mjs';
 // What both feedback tools' contracts share: the complete workflow contract, the archive and grant fields, the
 // closed diagnostics of a failure and the published report id.
 export const feedbackArtifactIdSchema = { type: 'string', pattern: `^${UUID_V4}$` };
@@ -26,10 +26,14 @@ export const feedbackDiagnosticsSchema = object({
     systemCode: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_SYSTEM_CODES },
     reason: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_REASONS },
     httpStatus: { type: 'integer', minimum: 100, maximum: 599 },
-    source: object({ module: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_MODULES }, line: { type: 'integer', minimum: 1, maximum: 9999999 }, column: { type: 'integer', minimum: 1, maximum: 9999999 } }, ['module', 'line', 'column']),
+    source: object({
+        module: { type: 'string', enum: FEEDBACK_DIAGNOSTIC_MODULES },
+        line: { type: 'integer', minimum: 1, maximum: 9999999 },
+        column: { type: 'integer', minimum: 1, maximum: 9999999 },
+    }, ['module', 'line', 'column']),
 }, ['operation']);
 export const feedbackErrorObject = (properties, required) => object({ ...properties, details: feedbackDiagnosticsSchema }, required);
-// Accepted residual "Opting out of history still sends the connection rows": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Opting out of history still sends the connection rows": docs/architecture/residuals/feedback.md.
 export const feedbackToolContract = String.raw `# Send feedback to e-Comet
 
 Use the remote \`report_issue\` tool together with the local \`prepare_e_comet_feedback\` and \`submit_e_comet_feedback\` tools. This is an externally mutating workflow: preserve the user's consent and resolved history choice through every recovery step.
@@ -81,4 +85,7 @@ For any uncertain upload, preparation metadata such as expiry does not prove rec
 
 After \`status:"uploaded"\`, answer in Russian: «Отчёт отправлен в e-Comet.», when useful specify «…с историей текущей сессии.» or «…без истории текущей сессии.» according to \`transcriptIncluded\`, then «При обращении в поддержку используйте идентификатор обращения:» and the exact \`reportId\` value on the next line, copied verbatim. Only a \`status:"uploaded"\` result has an identifier. Do not mention transcript truncation or add implementation details or caveats.
 `.replaceAll(String.raw `\``, '\x60');
-export const feedbackWorkflow = { appliesTo: ['prepare_e_comet_feedback', 'report_issue', 'submit_e_comet_feedback'], text: feedbackToolContract };
+export const feedbackWorkflow = {
+    appliesTo: ['prepare_e_comet_feedback', 'report_issue', 'submit_e_comet_feedback'],
+    text: feedbackToolContract,
+};

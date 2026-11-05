@@ -1,5 +1,6 @@
 import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { safeFeedbackProperty } from '../../transport/failures/evidence.mjs';
 const asError = (error) => (error instanceof Error ? error : new Error(String(error)));
 /**
  * Removes entries of `directory` whose name `ownName(name, dirent)` recognizes once they are older
@@ -9,14 +10,14 @@ const asError = (error) => (error instanceof Error ? error : new Error(String(er
  * the other pass has already removed (`ENOENT`) is a normal outcome. Never rejects: individual
  * failures are returned and reported by one stderr line per pass; the next sweep tries again.
  */
-export const sweepExpired = async ({ directory, ownName, retentionMs, now = Date.now(), recursive = false }) => {
+export const sweepExpired = async ({ directory, ownName, retentionMs, now = Date.now(), recursive = false, }) => {
     const errors = [];
     let entries = [];
     try {
         entries = await readdir(directory, { withFileTypes: true });
     }
     catch (error) {
-        if (error?.code === 'ENOENT')
+        if (safeFeedbackProperty(error, 'code') === 'ENOENT')
             return [];
         errors.push(asError(error));
     }
@@ -31,7 +32,7 @@ export const sweepExpired = async ({ directory, ownName, retentionMs, now = Date
                 await rm(path, { force: true, recursive: entry.isDirectory() });
         }
         catch (error) {
-            if (error?.code !== 'ENOENT')
+            if (safeFeedbackProperty(error, 'code') !== 'ENOENT')
                 errors.push(asError(error));
         }
     }

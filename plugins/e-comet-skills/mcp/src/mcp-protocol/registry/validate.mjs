@@ -1,12 +1,14 @@
 import { validateSchemaValue } from '../../shared/schema-validate.mjs';
+import { isRecord } from '../../shared/values.mjs';
 // `property` names the first failing property of our own schema; an unknown property is never echoed, it reads ''.
 export const validateArguments = (schema, args) => {
     if (schema && validateSchemaValue(args, schema))
         return { ok: true };
     const properties = schema?.properties ?? {};
-    const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+    const input = isRecord(args) ? args : {};
     const property = (schema?.required ?? []).find((key) => !Object.hasOwn(input, key)) ??
-        Object.keys(properties).find((key) => Object.hasOwn(input, key) && !validateSchemaValue(input[key], properties[key])) ?? '';
+        Object.entries(properties).find(([key, propertySchema]) => Object.hasOwn(input, key) && !validateSchemaValue(input[key], propertySchema))?.[0] ??
+        '';
     return { ok: false, property };
 };
 export const invalidArgumentsMessage = (name, { property }) => property === 'triggerUrl'

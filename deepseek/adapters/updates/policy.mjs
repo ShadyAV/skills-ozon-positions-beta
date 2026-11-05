@@ -1,3 +1,4 @@
+import { isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 const PACKAGE = 'dsh-e-comet-skills';
 const primaryRegistries = new WeakMap();
 /** Let the installing pnpm resolve its own age policy, exclusions and registry settings. */
@@ -8,7 +9,8 @@ export async function readProfileUpdate(ctx, { currentVersion, signal }) {
     if (!profile?.dir || !subprocess)
         throw new Error('Package policy inspection is unavailable.');
     const invocation = profile.packageManager ?? {
-        command: await subprocess.resolveExecutable('pnpm', undefined, signal), args: [],
+        command: await subprocess.resolveExecutable('pnpm', undefined, signal),
+        args: [],
     };
     signal.throwIfAborted();
     // Native Desktop supplies an executable and prefix arguments. Do not turn an
@@ -17,12 +19,14 @@ export async function readProfileUpdate(ctx, { currentVersion, signal }) {
     if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(invocation.command))
         throw new Error('Package policy inspection needs an executable invocation.');
     const manager = ctx.get('pluginManager');
-    const identity = (manager[Symbol.for('cordis.original')] ?? manager);
+    const identity = manager[Symbol.for('cordis.original')] ?? manager;
     if (!primaryRegistries.has(identity)) {
         // The primary registry is constructor configuration. Do not repeat the host's
         // unused pnpm-registry discovery; a replacement manager owns a fresh value.
         let rejectAbort;
-        const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+        const aborted = new Promise((_, reject) => {
+            rejectAbort = reject;
+        });
         const onAbort = () => rejectAbort(signal.reason);
         signal.addEventListener('abort', onAbort, { once: true });
         try {
@@ -37,11 +41,21 @@ export async function readProfileUpdate(ctx, { currentVersion, signal }) {
     signal.throwIfAborted();
     const registry = primaryRegistries.get(identity);
     // Primary registry only; see "Native DeepSeek update-check registry fallback"
-    // in docs/local-agent-architecture.md#accepted-residuals.
+    // in docs/architecture/residuals/deepseek.md.
     const handle = subprocess.spawn({
-        argv: [invocation.command, ...invocation.args, 'outdated', PACKAGE, '--format', 'json',
-            ...(registry ? [`--config.registry=${registry}`] : [])],
-        cwd: profile.dir, env: invocation.env, signal, graceMs: 1_000,
+        argv: [
+            invocation.command,
+            ...invocation.args,
+            'outdated',
+            PACKAGE,
+            '--format',
+            'json',
+            ...(registry ? [`--config.registry=${registry}`] : []),
+        ],
+        cwd: profile.dir,
+        env: invocation.env,
+        signal,
+        graceMs: 1_000,
         // A single filtered package normally produces less than 1 KiB. Refuse a
         // truncated answer instead of treating incomplete registry output as current.
         stdio: { stdin: 'ignore', stdout: { maxBytes: 64 * 1024 }, stderr: { maxBytes: 4096 } },
@@ -53,10 +67,12 @@ export async function readProfileUpdate(ctx, { currentVersion, signal }) {
         throw new Error('Package policy inspection failed.');
     // Parse boundary: pnpm's JSON answer, checked below.
     const packages = JSON.parse(output.text);
-    if (!packages || typeof packages !== 'object' || Array.isArray(packages) || packages.error)
+    if (!isRecord(packages) || packages.error)
         throw new Error('Package policy inspection returned an invalid answer.');
     const selected = packages[PACKAGE];
-    if (selected !== undefined && (!selected || typeof selected !== 'object' || typeof selected.latest !== 'string'))
+    if (selected === undefined)
+        return { name: PACKAGE, version: currentVersion };
+    if (!isRecord(selected) || typeof selected.latest !== 'string')
         throw new Error('Package policy inspection returned an invalid version.');
-    return { name: PACKAGE, version: selected?.latest ?? currentVersion };
+    return { name: PACKAGE, version: selected.latest };
 }

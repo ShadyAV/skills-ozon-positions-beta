@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { sweepExpired } from '../../storage/files/retention.mjs';
-import { RETRY_POLICIES, retryTransientFileOperation } from '../../storage/files/transient-retry.mjs';
-import { resolvePluginDataRoot } from '../../storage/files/layout.mjs';
-import { safeFeedbackProperty } from '../../transport/failures/evidence.mjs';
+import { validateTriggerUrl } from '../call-result.mjs';
+import { GRANT_POLICIES, SIGNED_LOCAL_TOOLS, isEntryFresh, validateTargetTool, } from './policy.mjs';
 import { HandoffError } from '../hook-io.mjs';
 import { hashSessionId as sessionHash, isValidSessionId, SESSION_ID_MAX_BYTES } from '../session.mjs';
-import { validateTriggerUrl } from '../call-result.mjs';
-import { GRANT_POLICIES, SIGNED_LOCAL_TOOLS, isEntryFresh, validateTargetTool } from './policy.mjs';
+import { isRecord } from '../../shared/values.mjs';
+import { resolvePluginDataRoot } from '../../storage/files/layout.mjs';
+import { sweepExpired } from '../../storage/files/retention.mjs';
+import { RETRY_POLICIES, retryTransientFileOperation } from '../../storage/files/transient-retry.mjs';
+import { safeFeedbackProperty } from '../../transport/failures/evidence.mjs';
 const { lifetimeMs: HANDOFF_TTL_MS, clockSkewMs: CLOCK_SKEW_MS } = GRANT_POLICIES.BROWSER_JOB;
 const STORE_DIRECTORY = 'browser-job-handoff-v1';
 const CLAIM_MARKER_SUFFIX = '.claimed';
@@ -45,20 +46,18 @@ const parseStoredEntry = (text, { requireTarget = false } = {}) => {
     catch {
         throw new HandoffError('HANDOFF_INVALID_ENTRY', 'The pending browser authorization is invalid.');
     }
-    if (!entry ||
-        entry.version !== 1 ||
-        typeof entry.createdAtMs !== 'number' ||
-        !Number.isSafeInteger(entry.createdAtMs)) {
+    if (!isRecord(entry) || entry.version !== 1 || typeof entry.createdAtMs !== 'number' || !Number.isSafeInteger(entry.createdAtMs)) {
         throw new HandoffError('HANDOFF_INVALID_ENTRY', 'The pending browser authorization is invalid.');
     }
-    validateTriggerUrl(entry.triggerUrl);
-    if (entry.targetTool !== undefined && !SIGNED_LOCAL_TOOLS.has(entry.targetTool)) {
+    const triggerUrl = validateTriggerUrl(entry.triggerUrl);
+    const targetTool = entry.targetTool;
+    if (targetTool !== undefined && (typeof targetTool !== 'string' || !SIGNED_LOCAL_TOOLS.has(targetTool))) {
         throw new HandoffError('HANDOFF_INVALID_ENTRY', 'The pending browser authorization is invalid.');
     }
-    if (requireTarget && entry.targetTool === undefined) {
+    if (requireTarget && targetTool === undefined) {
         throw new HandoffError('HANDOFF_INVALID_ENTRY', 'The pending browser authorization is invalid.');
     }
-    return entry;
+    return { version: 1, createdAtMs: entry.createdAtMs, triggerUrl, ...(targetTool === undefined ? {} : { targetTool }) };
 };
 export const ensurePrivateStoreDirectory = async (dataDirectory) => {
     await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
@@ -72,7 +71,7 @@ export const ensurePrivateStoreDirectory = async (dataDirectory) => {
 // retried once. Age is the file's own clock, like every other sweep. Two claimers that both observe one stale marker
 // can each remove what the other just created and both hold the election; for feedback the outcome is one repeated PUT
 // of the same archive to the same object key, which storage answers with 412. See the accepted residuals in
-// docs/local-agent-architecture.md#accepted-residuals.
+// docs/architecture/residuals/feedback.md.
 export const createClaimMarker = async (markerPath, { staleMarkerMs, remove }) => {
     const create = () => writeFile(markerPath, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     if (staleMarkerMs === undefined)
@@ -131,15 +130,14 @@ export const stageTriggerUrl = async ({ dataDirectory, sessionId, triggerUrl, ta
     }
 };
 export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, nowMs = Date.now(), fileNow = Date.now, }) => {
-    validateSessionId(sessionId);
-    validateTargetTool(targetTool);
+    const session = validateSessionId(sessionId);
+    const tool = validateTargetTool(targetTool);
     await ensurePrivateStoreDirectory(dataDirectory);
     const fileNowMs = fileNow();
     await sweepStore(dataDirectory, fileNowMs);
     const entries = await readdir(dataDirectory, { withFileTypes: true });
     const present = new Set(entries.map((entry) => entry.name));
-    // Both were validated above.
-    const pattern = entryFilePattern(sessionId, targetTool);
+    const pattern = entryFilePattern(session, tool);
     const candidates = [];
     for (const entry of entries) {
         const { name } = entry;
@@ -152,7 +150,7 @@ export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, no
             metadata = await stat(join(dataDirectory, name));
         }
         catch (error) {
-            if (error?.code === 'ENOENT')
+            if (safeFeedbackProperty(error, 'code') === 'ENOENT')
                 continue;
             throw error;
         }
@@ -161,7 +159,8 @@ export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, no
             continue;
         candidates.push(name);
     }
-    if (candidates.length === 0) {
+    const [candidate] = candidates;
+    if (candidate === undefined) {
         // browser_job stages its authorization only after it returns, so a local call issued beside it finds none yet.
         throw new HandoffError('HANDOFF_MISSING', 'No browser authorization is waiting for this conversation.', 'If browser_job ran in the same parallel step as this call, retry this local tool alone once, without a new browser_job; otherwise call browser_job once for the intended local tool, then retry without model-authored authorization fields.');
     }
@@ -180,13 +179,13 @@ export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, no
                 await writeFile(`${path}${CLAIM_MARKER_SUFFIX}`, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
             }
             catch (error) {
-                if (error?.code !== 'EEXIST')
+                if (safeFeedbackProperty(error, 'code') !== 'EEXIST')
                     throw error;
             }
         }
         throw new HandoffError('HANDOFF_MISSING', 'Several browser authorizations were waiting for this conversation; all of them were invalidated.');
     }
-    const entryPath = join(dataDirectory, candidates[0]);
+    const entryPath = join(dataDirectory, candidate);
     const markerPath = `${entryPath}${CLAIM_MARKER_SUFFIX}`;
     try {
         // Exclusive creation is the one-use primitive: exactly one caller can ever pass this line for
@@ -194,7 +193,7 @@ export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, no
         await createClaimMarker(markerPath, { staleMarkerMs: GRANT_POLICIES.BROWSER_JOB.staleMarkerMs, remove: removeQuietly });
     }
     catch (error) {
-        if (error?.code !== 'EEXIST')
+        if (safeFeedbackProperty(error, 'code') !== 'EEXIST')
             throw error;
         throw new HandoffError('HANDOFF_MISSING', 'No unambiguous browser authorization is waiting for this conversation.');
     }
@@ -204,7 +203,7 @@ export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, no
             text = await readFile(entryPath, 'utf8');
         }
         catch (error) {
-            if (error?.code !== 'ENOENT')
+            if (safeFeedbackProperty(error, 'code') !== 'ENOENT')
                 throw error;
             throw new HandoffError('HANDOFF_MISSING', 'No browser authorization is waiting for this conversation.');
         }
@@ -225,7 +224,7 @@ export const claimTriggerUrl = async ({ dataDirectory, sessionId, targetTool, no
 };
 // The browser-job grants in the host's plugin data. `open()` resolves the store directory for one event, so missing
 // plugin storage is refused where the flow first touches the store.
-export const createFileGrantStore = ({ env, fileNow = Date.now }) => ({
+export const createFileGrantStore = ({ env, fileNow = Date.now, }) => ({
     open: () => {
         const dataDirectory = resolveStoreDirectory(env);
         return {

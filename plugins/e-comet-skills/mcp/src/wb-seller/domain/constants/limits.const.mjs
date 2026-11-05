@@ -1,4 +1,5 @@
 import { MIN_REQUEST_TIMEOUT_MS } from '../../../shared/timeouts.mjs';
+import { isPositiveSafeInteger } from '../../../shared/values.mjs';
 import { SELLER_SCOPE_DURATION_MS } from '../../../transport/extension/wire.mjs';
 // A seller download streams the whole workbook as base64 frames, so its budget must cover the page-side
 // encode plus every chunk rather than the single JSON round trip the generic default was sized for.
@@ -31,7 +32,7 @@ export const sellerJobDurationMs = (scopeMaxMs, configuredDuration) => {
     }
     const scopeCeiling = Math.max(1, scopeMaxMs - MIN_REQUEST_TIMEOUT_MS);
     const defaultDuration = scopeMaxMs - SELLER_JOB_DOWNLOAD_RESERVE_MS;
-    const candidate = (Number.isSafeInteger(configuredDuration) && configuredDuration > 0 ? configuredDuration : defaultDuration);
+    const candidate = isPositiveSafeInteger(configuredDuration) ? configuredDuration : defaultDuration;
     return Math.min(Math.max(1, candidate > 0 ? candidate : scopeCeiling), scopeCeiling);
 };
 export const SELLER_JOB_MAX_DURATION_MS = sellerJobDurationMs(SELLER_SCOPE_DURATION_MS, SELLER_SCOPE_DURATION_MS - SELLER_JOB_DOWNLOAD_RESERVE_MS);

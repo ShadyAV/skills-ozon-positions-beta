@@ -1,9 +1,118 @@
-export const FEEDBACK_DIAGNOSTIC_OPERATIONS = Object.freeze(['prepare', 'input_validation', 'claim_verification', 'transcript_read', 'report_render', 'metadata_encode', 'archive_create', 'artifact_store', 'prepare_result', 'submit', 'grant_validation', 'artifact_read', 'upload', 'handoff_prepare', 'handoff_authorize', 'handoff_submit', 'claim_issue', 'claim_consume']);
-export const FEEDBACK_DIAGNOSTIC_ERROR_TYPES = Object.freeze(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError', 'AggregateError', 'NonError']);
-export const FEEDBACK_DIAGNOSTIC_SYSTEM_CODES = Object.freeze(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'EEXIST', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EBUSY', 'EINVAL', 'ELOOP', 'EXDEV', 'ENAMETOOLONG', 'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE']);
-export const FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES = Object.freeze(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EROFS', 'EMFILE', 'ENFILE', 'EIO', 'EEXIST', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EBUSY', 'EINVAL', 'ELOOP', 'EXDEV', 'ENAMETOOLONG']);
-export const FEEDBACK_DIAGNOSTIC_MODULES = Object.freeze(['feedback-diagnostics.mjs', 'feedback-errors.mjs', 'feedback-tools.mjs', 'feedback-upload.mjs', 'hook-signature.mjs', 'feedback-artifact-store.mjs', 'feedback-metadata.mjs', 'feedback-report.mjs', 'feedback-zip.mjs', 'mcp-dispatcher.mjs', 'tool-schemas.mjs']);
-export const FEEDBACK_DIAGNOSTIC_REASONS = Object.freeze(['claim_binding_mismatch', 'claim_signature_invalid', 'invalid_input', 'invalid_state', 'state_missing', 'storage_unavailable', 'upload_already_started', 'artifact_missing', 'artifact_expired', 'artifact_integrity', 'invalid_headers', 'network_timeout', 'internal_error', 'destination_refused']);
+import { isOneOf } from '../../shared/values.mjs';
+export const FEEDBACK_DIAGNOSTIC_OPERATIONS = [
+    'prepare',
+    'input_validation',
+    'claim_verification',
+    'transcript_read',
+    'report_render',
+    'metadata_encode',
+    'archive_create',
+    'artifact_store',
+    'prepare_result',
+    'submit',
+    'grant_validation',
+    'artifact_read',
+    'upload',
+    'handoff_prepare',
+    'handoff_authorize',
+    'handoff_submit',
+    'claim_issue',
+    'claim_consume',
+];
+export const FEEDBACK_DIAGNOSTIC_ERROR_TYPES = [
+    'Error',
+    'TypeError',
+    'RangeError',
+    'SyntaxError',
+    'ReferenceError',
+    'URIError',
+    'EvalError',
+    'AggregateError',
+    'NonError',
+];
+export const FEEDBACK_DIAGNOSTIC_SYSTEM_CODES = [
+    'EACCES',
+    'EPERM',
+    'ENOENT',
+    'ENOSPC',
+    'EDQUOT',
+    'EROFS',
+    'EMFILE',
+    'ENFILE',
+    'EIO',
+    'EEXIST',
+    'ENOTDIR',
+    'EISDIR',
+    'ENOTEMPTY',
+    'EBUSY',
+    'EINVAL',
+    'ELOOP',
+    'EXDEV',
+    'ENAMETOOLONG',
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'ECONNABORTED',
+    'ETIMEDOUT',
+    'EPIPE',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'ENETDOWN',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'CERT_HAS_EXPIRED',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+];
+export const FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES = [
+    'EACCES',
+    'EPERM',
+    'ENOENT',
+    'ENOSPC',
+    'EDQUOT',
+    'EROFS',
+    'EMFILE',
+    'ENFILE',
+    'EIO',
+    'EEXIST',
+    'ENOTDIR',
+    'EISDIR',
+    'ENOTEMPTY',
+    'EBUSY',
+    'EINVAL',
+    'ELOOP',
+    'EXDEV',
+    'ENAMETOOLONG',
+];
+export const FEEDBACK_DIAGNOSTIC_MODULES = [
+    'feedback-diagnostics.mjs',
+    'feedback-errors.mjs',
+    'feedback-tools.mjs',
+    'feedback-upload.mjs',
+    'hook-signature.mjs',
+    'feedback-artifact-store.mjs',
+    'feedback-metadata.mjs',
+    'feedback-report.mjs',
+    'feedback-zip.mjs',
+    'mcp-dispatcher.mjs',
+    'tool-schemas.mjs',
+];
+export const FEEDBACK_DIAGNOSTIC_REASONS = [
+    'claim_binding_mismatch',
+    'claim_signature_invalid',
+    'invalid_input',
+    'invalid_state',
+    'state_missing',
+    'storage_unavailable',
+    'upload_already_started',
+    'artifact_missing',
+    'artifact_expired',
+    'artifact_integrity',
+    'invalid_headers',
+    'network_timeout',
+    'internal_error',
+    'destination_refused',
+];
 const operations = new WeakMap();
 const httpStatuses = new WeakMap();
 // The names stay the flat file names (spec §7.6). Where each file lives now is the roots' knowledge: every root injects
@@ -16,7 +125,7 @@ const builtins = [TypeError, RangeError, SyntaxError, ReferenceError, URIError, 
 // Parse boundary: reads one property of an untrusted value, which the caller narrows.
 export const safeFeedbackProperty = (value, key) => {
     try {
-        return value?.[key];
+        return value === null || value === undefined ? undefined : Reflect.get(Object(value), key);
     }
     catch {
         return undefined;
@@ -33,7 +142,7 @@ export const withFeedbackOperation = (error, operation) => {
 };
 // Only the upload owner records definitive HTTP evidence; a similarly named foreign property is not evidence.
 export const recordFeedbackHttpStatus = (error, status) => {
-    if (Number.isInteger(status) && status >= 100 && status <= 599)
+    if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599)
         httpStatuses.set(error, status);
 };
 const sourcePoint = (error) => {
@@ -46,7 +155,7 @@ const sourcePoint = (error) => {
         const match = /(?:\(|at )([^()]+):(\d{1,7}):(\d{1,7})\)?$/.exec(frame);
         if (!match)
             continue;
-        const module = moduleNameOf(match[1]);
+        const module = moduleNameOf(match[1] ?? '');
         if (module !== undefined && Number(match[2]) > 0 && Number(match[3]) > 0)
             return { module, line: Number(match[2]), column: Number(match[3]) };
     }
@@ -54,30 +163,34 @@ const sourcePoint = (error) => {
 };
 /** Projects bounded evidence only. Never serializes messages, arbitrary names, stack text, or paths. */
 export const feedbackDiagnostics = (error, operation = 'prepare') => {
-    const result = { operation: FEEDBACK_DIAGNOSTIC_OPERATIONS.includes(operation) ? operation : 'prepare' };
+    const result = {
+        operation: FEEDBACK_DIAGNOSTIC_OPERATIONS.includes(operation) ? operation : 'prepare',
+    };
     const seen = new Set();
     let current = error;
     for (let depth = 0; depth < 8 && !seen.has(current); depth++) {
         seen.add(current);
         let errorType = 'NonError';
         try {
-            errorType = builtins.find(type => current instanceof type)?.name ?? 'NonError';
+            errorType = builtins.find((type) => current instanceof type)?.name ?? 'NonError';
         }
-        catch { /* Hostile proxies are not diagnostic evidence. */ }
+        catch {
+            /* Hostile proxies are not diagnostic evidence. */
+        }
         // Report the deepest inspected cause's built-in type, just like its system evidence.
         // Outer operation wrappers are plain Error by design; reporting their type would hide
         // useful original TypeError/RangeError failures. This is causal evidence, not proof of root cause.
         result.errorType = errorType;
-        const ownedOperation = operations.get(current);
+        const ownedOperation = typeof current === 'object' && current !== null ? operations.get(current) : undefined;
         if (ownedOperation)
             result.operation = ownedOperation;
         const code = safeFeedbackProperty(current, 'code');
-        if (FEEDBACK_DIAGNOSTIC_SYSTEM_CODES.includes(code))
+        if (isOneOf(FEEDBACK_DIAGNOSTIC_SYSTEM_CODES, code))
             result.systemCode = code;
         const reason = safeFeedbackProperty(current, 'feedbackReason');
-        if (FEEDBACK_DIAGNOSTIC_REASONS.includes(reason))
+        if (isOneOf(FEEDBACK_DIAGNOSTIC_REASONS, reason))
             result.reason = reason;
-        const httpStatus = httpStatuses.get(current);
+        const httpStatus = typeof current === 'object' && current !== null ? httpStatuses.get(current) : undefined;
         if (httpStatus !== undefined)
             result.httpStatus = httpStatus;
         const source = sourcePoint(current);

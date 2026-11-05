@@ -1,6 +1,6 @@
 import { REQUEST_TIMEOUT_GRACE_MS } from '../../../bridge/limits.mjs';
-import { MESSAGE_TYPES } from '../../../transport/extension/wire.mjs';
 import { ToolExecutionError } from '../../../shared/coded-error.mjs';
+import { MESSAGE_TYPES } from '../../../transport/extension/wire.mjs';
 import { BUYER_JOB_TYPES } from '../../domain/constants/descriptors.const.mjs';
 import { isAllowedWbUrl } from '../../domain/policies/wb-url.policy.mjs';
 // A request that ends with its one answer: a result or an error frame.
@@ -27,13 +27,12 @@ export const createWbFetch = ({ correlation }) => {
         }
         // Lease binding (spec §7.4): only a buyer or filters job the extension attested may fetch, and only allowed URLs.
         // Not narrowed to one URL family per job type: accepted residual "The WB fetch binds a lease to the buyer job
-        // family", docs/local-agent-architecture.md#accepted-residuals.
-        // A lease with an id is defined.
-        if (!BUYER_JOB_TYPES.has(lease.jobType) || !isAllowedWbUrl(url)) {
+        // family", docs/architecture/residuals/signed-flow.md.
+        if (!BUYER_JOB_TYPES.has(lease?.jobType) || !isAllowedWbUrl(url)) {
             return Promise.reject(new ToolExecutionError('BROWSER_JOB_URL_NOT_ALLOWED', 'Only approved Wildberries internal URLs are allowed.', 'arguments', false));
         }
         if (typeof authorizationScopeId !== 'string') {
-            return Promise.reject(correlation.scopeEnded(authorizationScopeId));
+            return Promise.reject(correlation.scopeEnded(undefined));
         }
         const authorizationScope = correlation.scopes.get(authorizationScopeId);
         if (!authorizationScope || !correlation.scopeIsActive(authorizationScopeId, authorizationScope)) {
@@ -61,7 +60,7 @@ export const createWbFetch = ({ correlation }) => {
             }).result;
         })();
         inFlightFetches.set(dedupeKey, request);
-        void request.then(() => inFlightFetches.delete(dedupeKey), () => inFlightFetches.delete(dedupeKey));
+        request.then(() => inFlightFetches.delete(dedupeKey), () => inFlightFetches.delete(dedupeKey));
         return request;
     };
     return { fetch };

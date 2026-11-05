@@ -35,8 +35,9 @@ function accountSentence({ state, errorCode, authorizationUrl } = {}) {
         return `The e-Comet account login expired: remote e-Comet tools are absent. ${CONNECT} again.`;
     if (state === 'error' && errorCode === 'unlink-failed')
         return `Unlinking the e-Comet account failed and the account is disconnected. Ask the user to press «Отвязать аккаунт» or «Связать с аккаунтом e-Comet» in ${CARD}.`;
-    if (state === 'error' && ATTEMPT_FAILED[errorCode])
-        return `The last e-Comet account connection attempt failed: ${ATTEMPT_FAILED[errorCode]}; remote e-Comet tools are absent. ${CONNECT} again.${errorCode === 'authorization-declined' ? '' : ` If it fails again, suggest checking this computer's internet connection (VPN, proxy, firewall) as a candidate; if that does not help, ask the user to ${SUPPORT}.`}`;
+    const attemptFailed = errorCode === undefined ? undefined : ATTEMPT_FAILED[errorCode];
+    if (state === 'error' && attemptFailed)
+        return `The last e-Comet account connection attempt failed: ${attemptFailed}; remote e-Comet tools are absent. ${CONNECT} again.${errorCode === 'authorization-declined' ? '' : ` If it fails again, suggest checking this computer's internet connection (VPN, proxy, firewall) as a candidate; if that does not help, ask the user to ${SUPPORT}.`}`;
     return `The e-Comet account is not connected (${state}${errorCode ? `, ${errorCode}` : ''}). Ask the user to check ${CARD} in DeepSeek.`;
 }
 function localSentence({ local, localFailure } = {}) {
@@ -48,7 +49,7 @@ function localSentence({ local, localFailure } = {}) {
     // The adapter keeps restarting the module (5 s, 15 s, 60 s, then every five minutes after start failures; about every
     // 5 s after a crash that followed a successful handshake), so the user step comes second.
     // A crash loop makes this text flap with the module: see "Native DeepSeek snapshot flapping during a crash loop" in
-    // docs/local-agent-architecture.md#accepted-residuals.
+    // docs/architecture/residuals/deepseek.md.
     return `The local e-Comet module (live Wildberries data, Ozon reports, bug reports) is not running (${cause}); its tools are absent and no bug report can be sent from DeepSeek. The plugin restarts it by itself: wait until its tools return; repeating a call is the user's decision. If it stays unavailable for a few minutes, ask the user to restart DeepSeek; if that does not help, ask the user to ${SUPPORT}.`;
 }
 /**
@@ -56,7 +57,7 @@ function localSentence({ local, localFailure } = {}) {
  * evaluated at every prompt assembly; the host re-sends the snapshot only when it changes, and the
  * normal case renders nothing. An update pause unmounts both connections, so it speaks alone.
  */
-export function renderStatusContext({ account, connections, updates } = {}) {
+export function renderStatusContext({ account, connections, updates, } = {}) {
     const paused = updateSentence(updates);
     const sentences = paused ? [paused] : [accountSentence(account), localSentence(connections)].filter(Boolean);
     if (!sentences.length)

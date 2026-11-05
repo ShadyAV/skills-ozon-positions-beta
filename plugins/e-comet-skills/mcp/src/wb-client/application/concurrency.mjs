@@ -27,12 +27,11 @@ export const createConcurrencyLimiter = (concurrency, worker) => {
 };
 export const runWithConcurrency = async (items, concurrency, worker) => {
     const results = new Array(items.length);
-    let nextIndex = 0;
+    // One iterator for every runner: each takes the next item when it is free.
+    const entries = items.entries();
     const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-        while (nextIndex < items.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            results[index] = await worker(items[index], index);
+        for (const [index, item] of entries) {
+            results[index] = await worker(item, index);
         }
     });
     await Promise.all(runners);

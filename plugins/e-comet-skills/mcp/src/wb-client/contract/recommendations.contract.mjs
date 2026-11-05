@@ -1,7 +1,7 @@
-import { array, boolean, nonNegativeInteger, nullableNonNegativeInteger, object, objectUnion, positiveInteger } from '../../transport/mcp/schema.mjs';
-import { buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, pageSchema, resultPathGuidance } from './live.mjs';
-import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
+import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { toolErrorSchema, withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
+import { array, boolean, nonNegativeInteger, nullableNonNegativeInteger, object, objectUnion, positiveInteger, } from '../../transport/mcp/schema.mjs';
+import { buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, pageSchema, resultPathGuidance, } from './live.mjs';
 const recommendationArticleSchema = object({
     sourceNmId: positiveInteger,
     pagesRequested: positiveInteger,
@@ -35,9 +35,25 @@ const recommendationsSuccessSchema = object({
     productFilterApplied: boolean,
     productLimitPerSource: positiveInteger,
     articles: array(recommendationArticleSchema),
-}, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'complete', 'truncatedByLocalLimit', 'pagesRequested', 'pagesSucceeded', 'pagesFailed', 'productFilterApplied', 'articles']);
+}, [
+    'ok',
+    'status',
+    'jobType',
+    'jobId',
+    'resultPath',
+    'complete',
+    'truncatedByLocalLimit',
+    'pagesRequested',
+    'pagesSucceeded',
+    'pagesFailed',
+    'productFilterApplied',
+    'articles',
+]);
 const recommendationsContract = 'Get live Wildberries recommendation shelves for source article IDs and check whether specific products occur in them. Use for Russian requests about рекомендации, похожие товары, рекомендательная полка, соседние товары, or whether a product встречается в рекомендациях. ' +
-    authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance + rejectionAndHandoffGuidance +
+    authorizationWorkflow +
+    localBridgeFailureGuidance +
+    buyerOutcomeGuidance +
+    rejectionAndHandoffGuidance +
     'Authorize with job {type:"recommendations_by_product",products:[{product_id:integer,pages?:integer},...]}; use unique source product IDs, at most 50 pages for each product, and 1000 pages total; an omitted pages value counts as 50 toward the total. ' +
     'For первые N recommendations, explicitly request pages: 1 and pass local productLimitPerSource: N. Omit pages only when the user explicitly needs the whole discovered shelf within local limits. ' +
     'For a membership check, put исходные товары in remote job.products and целевые товары in local productNmIds. Read articles[].pages[].products and group results by sourceNmId. ' +
@@ -53,5 +69,8 @@ export const contract = {
     inputSchema: liveInputSchema('productLimitPerSource', 'source product'),
     outputSchema: withRunningAnswer(withOperationDiagnostic(objectUnion(...liveAggregateSchemas(recommendationsSuccessSchema), toolErrorSchema))),
     annotations: liveToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'wb_recommendations_by_product'], text: `${recommendationsContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'wb_recommendations_by_product'],
+        text: `${recommendationsContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

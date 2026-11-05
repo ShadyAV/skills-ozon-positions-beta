@@ -10,7 +10,15 @@ const packageRoot = dirname(sourceDirectory);
 const pluginRoot = dirname(packageRoot);
 const installation = createInstallationReader({ packageRoot, pluginRoot });
 // The CLI doctor and the installation diagnosis: this root knows where the installed plugin lies.
-export const collectDoctorReport = async ({ env = process.env, platform = process.platform, arch = process.arch, nodeVersion = process.version, observedAt = new Date().toISOString() } = {}) => doctorReport({ installation, storageLayout: resolveStorageLayout({ env, platform: platform }), osRelease: release(), platform, arch, nodeVersion, observedAt });
+export const collectDoctorReport = async ({ env = process.env, platform = process.platform, arch = process.arch, nodeVersion = process.version, observedAt = new Date().toISOString(), } = {}) => doctorReport({
+    installation,
+    storageLayout: resolveStorageLayout({ env, platform }),
+    osRelease: release(),
+    platform,
+    arch,
+    nodeVersion,
+    observedAt,
+});
 const main = async () => {
     if (process.argv.length !== 3 || process.argv[2] !== '--json')
         throw new TypeError('Usage: node doctor.mjs --json');
@@ -31,5 +39,7 @@ const isEntryPoint = (invokedPath) => {
     }
 };
 if (isEntryPoint(process.argv[1])) {
-    main().catch(() => { process.exitCode = 1; });
+    main().catch(() => {
+        process.exitCode = 1;
+    });
 }

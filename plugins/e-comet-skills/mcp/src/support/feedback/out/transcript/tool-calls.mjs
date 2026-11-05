@@ -1,6 +1,6 @@
-import { isRecord as isObject } from '../../../../shared/values.mjs';
+import { isNonNegativeSafeInteger, isRecord as isObject } from '../../../../shared/values.mjs';
 import { STRUCTURED_MCP_EVIDENCE_MARKER } from '../../contract/tool-calls.mjs';
-import { acceptedToolName, callRecord, OUTCOME_TEXT_MAX_LENGTH, toolOutcomeProjector } from '../../domain/converters/tool-outcome.converter.mjs';
+import { acceptedToolName, callRecord, OUTCOME_TEXT_MAX_LENGTH, toolOutcomeProjector, } from '../../domain/converters/tool-outcome.converter.mjs';
 /** The transcript reader over the tool names the root passes (the tool-names port). */
 export const createToolCallExtractor = (toolNames) => {
     const projectFeedbackToolOutcome = toolOutcomeProjector(toolNames);
@@ -63,7 +63,7 @@ export const createToolCallExtractor = (toolNames) => {
     // Native DSH session v4 logs use numeric milliseconds and exact top-level events. Do not
     // walk message payloads or parse authored arguments: only names and correlated outcomes leave here.
     // Prepared-receipt recovery keeps its own session/argument rules and its own call/result matching: see the accepted
-    // residual "Separate native preparation-recovery and diagnostic pairing" in docs/local-agent-architecture.md#accepted-residuals.
+    // residual "Separate native preparation-recovery and diagnostic pairing" in docs/architecture/residuals/feedback.md.
     const deepseekToolEvent = (record, pending) => {
         if (!isObject(record.data))
             return undefined;
@@ -73,8 +73,7 @@ export const createToolCallExtractor = (toolNames) => {
         if (direct || nested) {
             if (!acceptedToolName(data.name))
                 return undefined;
-            const timestamp = Number.isSafeInteger(record.time) && record.time >= 0 && record.time <= 253402300799999
-                ? new Date(record.time).toISOString() : undefined;
+            const timestamp = isNonNegativeSafeInteger(record.time) && record.time <= 253402300799999 ? new Date(record.time).toISOString() : undefined;
             const call = callRecord(data.name, timestamp);
             const id = direct ? data.callId : data.subCallId;
             if (typeof id === 'string')
@@ -98,12 +97,14 @@ export const createToolCallExtractor = (toolNames) => {
         // Bound the entire block before scanning, and never search prose for JSON fields.
         const content = outcome.isError === true && Array.isArray(outcome.content)
             ? outcome.content.map((block) => {
-                if (!isObject(block) || block.type !== 'text' || typeof block.text !== 'string'
-                    || block.text.length > OUTCOME_TEXT_MAX_LENGTH || !block.text.startsWith('Error: '))
+                if (!isObject(block) ||
+                    block.type !== 'text' ||
+                    typeof block.text !== 'string' ||
+                    block.text.length > OUTCOME_TEXT_MAX_LENGTH ||
+                    !block.text.startsWith('Error: '))
                     return block;
                 const marker = block.text.lastIndexOf(STRUCTURED_MCP_EVIDENCE_MARKER);
-                const text = marker < 0 ? block.text.slice(7)
-                    : block.text.slice(marker + STRUCTURED_MCP_EVIDENCE_MARKER.length);
+                const text = marker < 0 ? block.text.slice(7) : block.text.slice(marker + STRUCTURED_MCP_EVIDENCE_MARKER.length);
                 // Starting at the object prevents the generic exec-output wrapper parser
                 // from admitting prose before a malformed or forged evidence suffix.
                 return { ...block, text: text.startsWith('{') ? text : '' };
@@ -118,9 +119,6 @@ export const createToolCallExtractor = (toolNames) => {
      * Extract tool calls in native Claude, Codex and DeepSeek JSONL records: the safe direct name, the
      * record timestamp when the host wrote one, and the closed outcome of the correlated result.
      * Payloads are never searched recursively because transcript content is untrusted diagnostic input.
-     *
-     * @param {Buffer} jsonlBytes
-     * @returns {Array<{ name: string, at?: string, outcome?: { ok?: boolean, status?: string, code?: string, stage?: string, cause?: string, isError?: true } }>}
      */
     return (jsonlBytes) => {
         if (!Buffer.isBuffer(jsonlBytes))

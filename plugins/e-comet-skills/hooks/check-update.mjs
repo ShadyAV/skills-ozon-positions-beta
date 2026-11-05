@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 const CALVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+codex\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 // Connector-id names list remote tools one by one: a method the server publishes before our next release stays
 // unmatched until it is listed here and in hooks.json (accepted residual, see
-// docs/local-agent-architecture.md#accepted-residuals).
-const ECOMET_TOOL_PATTERN = /^mcp__(?:(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet(?:[-_]local)?__.+|(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:claude_ai_)?https_mcp_e[-_]comet_io_mcp)__(?:info|describe_metrics|list_entities|query_metrics|query_forecast|browser_job|org_balance|subscription|subscription_balance_history|query_phrase_frequency|search_phrases|campaign_settings|campaign_clusters_settings|campaign_target_products_settings|product_settings|update_campaign_settings|update_campaign_clusters_settings|update_campaign_target_products_settings|update_product_settings|campaign_comments|product_comments|update_campaign_comments|update_product_comments|campaign_journal|product_journal|account_journal|search_positions|recom_positions|org_balance_history|campaign_budget|campaign_budget_history|find_account|stock_rebalancer_settings|stock_rebalancer_status|update_stock_rebalancer_settings|report_issue))$/;
+// docs/architecture/residuals/signed-flow.md).
+const ECOMET_TOOL_PATTERN = /^mcp__(?:(?:(?:remote-devices__)?plugin_e-comet-skills_)?e[-_]comet(?:[-_]local)?__.+|(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:claude_ai_)?https_mcp_e[-_]comet_io_mcp)__(?:info|describe_metrics|list_entities|query_metrics|query_forecast|browser_job|org_balance|subscription|subscription_balance_history|query_phrase_frequency|search_phrases|campaign_settings|campaign_clusters_settings|campaign_target_products_settings|product_settings|update_campaign_settings|update_campaign_clusters_settings|update_campaign_target_products_settings|update_product_settings|campaign_comments|product_comments|update_campaign_comments|update_product_comments|campaign_journal|product_journal|account_journal|search_positions|recom_positions|org_balance_history|campaign_budget|campaign_budget_history|order_feed|find_account|stock_rebalancer_settings|stock_rebalancer_status|update_stock_rebalancer_settings|report_issue))$/;
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_SESSION_BYTES = 1024;
 const MAX_STDIN_BYTES = 1024 * 1024;
@@ -35,6 +35,9 @@ export const REMOTE_INTERVAL_MS = 86_400_000;
 export const MAX_FUTURE_SKEW_MS = 300_000;
 export const FETCH_TIMEOUT_MS = 2_500;
 export const MAX_CALVER_BYTES = 256;
+// This hook stays self-contained (a host may copy only hooks/), so it keeps its own record and error-code reads.
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const errorCode = (error) => (typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined);
 export const normalizeCalVer = (value) => {
     if (typeof value !== 'string')
         return null;
@@ -52,9 +55,11 @@ export const compareCalVer = (left, right) => {
     if (normalizedLeft === null || normalizedRight === null)
         return null;
     for (let index = 0; index < normalizedLeft.length; index += 1) {
-        if (normalizedLeft[index] < normalizedRight[index])
+        const leftComponent = normalizedLeft[index] ?? 0;
+        const rightComponent = normalizedRight[index] ?? 0;
+        if (leftComponent < rightComponent)
             return -1;
-        if (normalizedLeft[index] > normalizedRight[index])
+        if (leftComponent > rightComponent)
             return 1;
     }
     return 0;
@@ -63,65 +68,72 @@ export const compareCalVer = (left, right) => {
 const normalizeAdded = (value) => {
     if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ADDED_ENTRIES)
         return null;
-    for (const entry of value) {
+    const entries = value;
+    const added = [];
+    for (const entry of entries) {
         if (typeof entry !== 'string' || entry.trim().length === 0)
             return null;
         if (Buffer.byteLength(entry, 'utf8') > MAX_ADDED_ENTRY_BYTES)
             return null;
         if (CONTROL_CHARACTERS.test(entry))
             return null;
+        added.push(entry);
     }
-    return [...value];
+    return added;
 };
 // Parse boundary: feed JSON, checked here.
 export const normalizeChangelogFeed = (value, installedVersion) => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
+    if (!isRecord(value))
         return null;
     if (Object.keys(value).sort().join('\0') !== ['releases', 'schemaVersion', 'version'].join('\0'))
         return null;
     if (value.schemaVersion !== 1)
         return null;
-    if (normalizeCalVer(value.version) === null || normalizeCalVer(installedVersion) === null)
+    const version = value.version;
+    if (typeof version !== 'string' || normalizeCalVer(version) === null || normalizeCalVer(installedVersion) === null)
         return null;
     // The top-level version identifies the exact build whose local changelog this is. Numeric CalVer
     // comparison deliberately ignores +codex metadata for release ranges, but build identity must not.
-    if (value.version !== installedVersion)
+    if (version !== installedVersion)
         return null;
     if (!Array.isArray(value.releases) || value.releases.length > MAX_RELEASES)
         return null;
+    const entries = value.releases;
     const releases = [];
     let previous = null;
-    for (const release of value.releases) {
-        if (release === null || typeof release !== 'object' || Array.isArray(release))
+    for (const release of entries) {
+        if (!isRecord(release))
             return null;
         if (Object.keys(release).sort().join('\0') !== ['added', 'version'].join('\0'))
             return null;
-        if (normalizeCalVer(release.version) === null)
+        const releaseVersion = release.version;
+        if (typeof releaseVersion !== 'string' || normalizeCalVer(releaseVersion) === null)
             return null;
-        if (compareCalVer(release.version, value.version) === 1)
+        if (compareCalVer(releaseVersion, version) === 1)
             return null;
         // Strictly descending: selection walks this list newest first and stops when the budget is hit.
-        if (previous !== null && compareCalVer(previous, release.version) !== 1)
+        if (previous !== null && compareCalVer(previous, releaseVersion) !== 1)
             return null;
         const added = normalizeAdded(release.added);
         if (added === null)
             return null;
-        releases.push({ version: release.version, added });
-        previous = release.version;
+        releases.push({ version: releaseVersion, added });
+        previous = releaseVersion;
     }
-    return { version: value.version, releases };
+    return { version, releases };
 };
 // Parse boundary: state JSON, checked here.
 export const normalizeHandledState = (value) => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
+    if (!isRecord(value))
         return null;
     if (Object.keys(value).sort().join('\0') !== ['lastHandledVersion', 'schemaVersion'].join('\0'))
         return null;
     if (value.schemaVersion !== 1)
         return null;
-    return normalizeCalVer(value.lastHandledVersion) === null ? null : value.lastHandledVersion;
+    const version = value.lastHandledVersion;
+    return typeof version !== 'string' || normalizeCalVer(version) === null ? null : version;
 };
-export const selectChangelogEntries = ({ feed, handledVersion, installedVersion, budget = CHANGELOG_CONTEXT_BUDGET }) => {
+export const selectChangelogEntries = ({ feed, handledVersion, installedVersion, budget = CHANGELOG_CONTEXT_BUDGET, }) => {
     const inRange = feed.releases.filter((release) => compareCalVer(release.version, handledVersion) === 1 && compareCalVer(release.version, installedVersion) !== 1);
     if (inRange.length === 0)
         return null;
@@ -129,9 +141,9 @@ export const selectChangelogEntries = ({ feed, handledVersion, installedVersion,
     let added = [];
     let taken = 0;
     let prefix = [];
-    for (let index = 0; index < inRange.length; index += 1) {
+    for (const [index, release] of inRange.entries()) {
         // Whole releases only: a user never sees half of a version.
-        prefix = [...prefix, ...inRange[index].added];
+        prefix = [...prefix, ...release.added];
         const rendered = buildChangelogContext(installedVersion, prefix, totalEntries - prefix.length, inRange.length - (index + 1));
         // Measure the encoded notice, including escaped entry text and omission counters.
         // Retain the deepest whole-release prefix that fits the shared context budget.
@@ -142,7 +154,7 @@ export const selectChangelogEntries = ({ feed, handledVersion, installedVersion,
     }
     return { added, omittedEntries: totalEntries - added.length, omittedReleases: inRange.length - taken };
 };
-export const decideChangelogNotice = ({ installedVersion, handledVersion, selection }) => {
+export const decideChangelogNotice = ({ installedVersion, handledVersion, selection, }) => {
     if (handledVersion === null)
         return { emit: false, store: installedVersion };
     const order = compareCalVer(handledVersion, installedVersion);
@@ -157,15 +169,22 @@ export const decideChangelogNotice = ({ installedVersion, handledVersion, select
 // The hook supplies information, not instructions that compete with the user's task.
 // Presentation belongs to the plugin's server instructions; release-note strings remain data.
 const noticeData = (kind, fields) => JSON.stringify({
-    schemaVersion: 1, type: 'e_comet_plugin_notice', kind, ...fields,
+    schemaVersion: 1,
+    type: 'e_comet_plugin_notice',
+    kind,
+    ...fields,
 });
 export const buildChangelogContext = (version, added, omittedEntries, omittedReleases) => noticeData('update_installed', {
-    installedVersion: version, added, omittedEntries, omittedReleases, changelogUrl: CHANGELOG_URL,
+    installedVersion: version,
+    added,
+    omittedEntries,
+    omittedReleases,
+    changelogUrl: CHANGELOG_URL,
 });
 export const buildChangelogDigestContext = (version) => noticeData('update_installed_digest', { installedVersion: version, changelogUrl: CHANGELOG_URL });
 // Parse boundary: the host's event JSON, checked here.
 export const validateEvent = (value) => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
+    if (!isRecord(value))
         return null;
     const { hook_event_name: hookEventName, session_id: sessionId, tool_name: toolName } = value;
     if (hookEventName !== 'PreToolUse')
@@ -175,7 +194,7 @@ export const validateEvent = (value) => {
     if (typeof toolName !== 'string' || !ECOMET_TOOL_PATTERN.test(toolName))
         return null;
     // Defer optional notices across the entire feedback chain, without consuming delivery state.
-    if (['prepare_e_comet_feedback', 'report_issue', 'submit_e_comet_feedback'].includes(toolName.split('__').at(-1)))
+    if (['prepare_e_comet_feedback', 'report_issue', 'submit_e_comet_feedback'].includes(toolName.split('__').at(-1) ?? ''))
         return null;
     return { sessionId, toolName };
 };
@@ -229,7 +248,8 @@ export const readInstalledVersion = async (pluginRoot) => {
         if (raw === null)
             return null;
         const manifest = JSON.parse(raw);
-        return normalizeCalVer(manifest?.version) === null ? null : manifest.version;
+        const version = isRecord(manifest) ? manifest.version : undefined;
+        return typeof version !== 'string' || normalizeCalVer(version) === null ? null : version;
     }
     catch {
         return null;
@@ -251,7 +271,7 @@ export const readHandledState = async (stateDir, readStateFile = readBoundedFile
         return version === null ? { status: 'invalid' } : { status: 'valid', version };
     }
     catch (error) {
-        return { status: error?.code === 'ENOENT' ? 'missing' : 'error' };
+        return { status: errorCode(error) === 'ENOENT' ? 'missing' : 'error' };
     }
 };
 export const readChangelogFeed = async (pluginRoot, installedVersion) => {
@@ -290,15 +310,15 @@ export const resolveChangelogNotice = async ({ pluginRoot, readFeed = readChange
         // Concurrent calls all read the same stale state. Exclusive creation of one election file per
         // installed version admits a single publisher, and a winner that then reads updated state has
         // been overtaken and stays silent. This election covers one installed version; overlapping old
-        // and new roots can repeat a notice (accepted residual in docs/local-agent-architecture.md#accepted-residuals).
+        // and new roots can repeat a notice (accepted residual in docs/architecture/residuals/signed-flow.md).
         // The version is hashed into the name because a CalVer with build metadata may exceed a filename.
-        // A hook killed inside its timeout can suppress one version's notice; the next recovers: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
+        // A hook killed inside its timeout can suppress one version's notice; the next recovers: accepted residual, see docs/architecture/residuals/signed-flow.md.
         const election = join(stateDir, `${CHANGELOG_STATE_NAME}.${sessionKey(installedVersion).slice(0, 32)}.pending`);
         try {
             await writeFile(election, '', { flag: 'wx', mode: 0o600 });
         }
         catch (error) {
-            if (error?.code === 'EEXIST')
+            if (errorCode(error) === 'EEXIST')
                 return null;
             throw error;
         }
@@ -307,7 +327,7 @@ export const resolveChangelogNotice = async ({ pluginRoot, readFeed = readChange
             // A state that cannot be read now may already carry this version: silence over a repeat.
             if (current.status === 'error')
                 return null;
-            if (current.status === 'valid' && compareCalVer(current.version, installedVersion) >= 0)
+            if (current.status === 'valid' && (compareCalVer(current.version, installedVersion) ?? 0) >= 0)
                 return null;
             // Persist before emitting: a lost notification is preferred over a repeated one.
             await writeState(join(stateDir, CHANGELOG_STATE_NAME), { schemaVersion: 1, lastHandledVersion: store });
@@ -316,7 +336,7 @@ export const resolveChangelogNotice = async ({ pluginRoot, readFeed = readChange
             await rm(election, { force: true }).catch(() => undefined);
         }
         // emit holds only with a selection.
-        return emit ? { version: installedVersion, ...selection } : null;
+        return emit && selection ? { version: installedVersion, ...selection } : null;
     }
     catch {
         return null;
@@ -324,32 +344,32 @@ export const resolveChangelogNotice = async ({ pluginRoot, readFeed = readChange
 };
 export const sessionKey = (sessionId) => createHash('sha256').update(sessionId, 'utf8').digest('hex');
 export const buildAdditionalContext = (installedVersion, latestVersion) => noticeData('update_available', { installedVersion, latestVersion, updateUrl: UPDATE_URL });
-const isValidTimestamp = (value, nowMs) => value === null || (Number.isSafeInteger(value) && value >= 0 && value <= nowMs + MAX_FUTURE_SKEW_MS);
-const isValidEtag = (value) => value === null || (typeof value === 'string' &&
-    Buffer.byteLength(value, 'utf8') <= MAX_ETAG_BYTES &&
-    !/[\u0000-\u001f\u007f]/.test(value));
-// Parse boundary: cache JSON, checked here.
-const normalizeCache = (value, nowMs) => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value))
-        return null;
+const isValidTimestamp = (value, nowMs) => value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= nowMs + MAX_FUTURE_SKEW_MS);
+const isValidEtag = (value) => value === null ||
+    (typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= MAX_ETAG_BYTES && !/[\u0000-\u001f\u007f]/.test(value));
+const isCacheState = (value, nowMs) => {
+    if (!isRecord(value))
+        return false;
     const expectedKeys = ['etag', 'lastAttemptAt', 'lastSuccessAt', 'latestVersion', 'schemaVersion'];
     if (Object.keys(value).sort().join('\0') !== expectedKeys.join('\0'))
-        return null;
+        return false;
     if (value.schemaVersion !== 1)
-        return null;
+        return false;
     if (!isValidTimestamp(value.lastAttemptAt, nowMs) || !isValidTimestamp(value.lastSuccessAt, nowMs))
-        return null;
+        return false;
     if (!isValidEtag(value.etag))
-        return null;
+        return false;
     if (value.latestVersion === null) {
         if (value.etag !== null || value.lastSuccessAt !== null)
-            return null;
+            return false;
     }
     else if (normalizeCalVer(value.latestVersion) === null || value.lastSuccessAt === null) {
-        return null;
+        return false;
     }
-    return { ...value };
+    return true;
 };
+// Parse boundary: cache JSON, checked here; a valid cache keeps its own key order.
+const normalizeCache = (value, nowMs) => (isCacheState(value, nowMs) ? { ...value } : null);
 const emptyCache = () => ({
     schemaVersion: 1,
     latestVersion: null,
@@ -366,12 +386,12 @@ export const readCacheState = async (dataRoot, nowMs) => {
         return normalized === null ? { corrupt: true, value: null } : { corrupt: false, value: normalized };
     }
     catch (error) {
-        if (error?.code === 'ENOENT')
+        if (errorCode(error) === 'ENOENT')
             return { corrupt: false, value: null };
         return { corrupt: true, value: null };
     }
 };
-export const writeAtomicJson = async (path, value, { renameFile = rename, wait = setTimeout } = {}) => {
+export const writeAtomicJson = async (path, value, { renameFile = rename, wait = setTimeout, } = {}) => {
     const temporary = join(dirname(path), `.${randomBytes(16).toString('hex')}.tmp`);
     try {
         await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
@@ -381,7 +401,7 @@ export const writeAtomicJson = async (path, value, { renameFile = rename, wait =
                 return;
             }
             catch (error) {
-                if (!TRANSIENT_FILESYSTEM_ERRORS.has(error?.code) || attempt === CACHE_REPLACE_RETRY_LIMIT - 1)
+                if (!TRANSIENT_FILESYSTEM_ERRORS.has(errorCode(error)) || attempt === CACHE_REPLACE_RETRY_LIMIT - 1)
                     throw error;
                 await new Promise((resolveWait) => wait(resolveWait, CACHE_REPLACE_RETRY_MS));
             }
@@ -421,7 +441,7 @@ const readResponseBody = async (response) => {
         reader.releaseLock();
     }
 };
-export const fetchLatestVersion = async ({ cached, fetchImpl, timeoutMs }) => {
+export const fetchLatestVersion = async ({ cached, fetchImpl, timeoutMs, }) => {
     const controller = new AbortController();
     let timer;
     try {
@@ -434,10 +454,7 @@ export const fetchLatestVersion = async ({ cached, fetchImpl, timeoutMs }) => {
                 reject(new Error('timeout'));
             }, timeoutMs);
         });
-        const response = await Promise.race([
-            fetchImpl(REMOTE_MANIFEST_URL, { headers, signal: controller.signal }),
-            timeout,
-        ]);
+        const response = await Promise.race([fetchImpl(REMOTE_MANIFEST_URL, { headers, signal: controller.signal }), timeout]);
         if (response.status === 304) {
             if (cached?.latestVersion === undefined || cached?.latestVersion === null || cached.etag === null)
                 return null;
@@ -449,14 +466,15 @@ export const fetchLatestVersion = async ({ cached, fetchImpl, timeoutMs }) => {
         if (raw === null)
             return null;
         const manifest = JSON.parse(raw);
-        if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest))
+        if (!isRecord(manifest))
             return null;
-        if (manifest.name !== 'e-comet-skills' || normalizeCalVer(manifest.version) === null)
+        const latestVersion = manifest.version;
+        if (manifest.name !== 'e-comet-skills' || typeof latestVersion !== 'string' || normalizeCalVer(latestVersion) === null)
             return null;
         const etag = response.headers.get('etag');
         if (!isValidEtag(etag))
             return null;
-        return { latestVersion: manifest.version, etag };
+        return { latestVersion, etag };
     }
     catch {
         return null;
@@ -465,7 +483,7 @@ export const fetchLatestVersion = async ({ cached, fetchImpl, timeoutMs }) => {
         clearTimeout(timer);
     }
 };
-const resolveLatestVersion = async ({ dataRoot, fetchImpl, nowMs }) => {
+const resolveLatestVersion = async ({ dataRoot, fetchImpl, nowMs, }) => {
     const cacheState = await readCacheState(dataRoot, nowMs);
     if (cacheState.corrupt)
         return { fatal: true };
@@ -482,7 +500,7 @@ const resolveLatestVersion = async ({ dataRoot, fetchImpl, nowMs }) => {
         return { fatal: false, cached: attempted };
     let successful;
     // A cached version is a validated CalVer, so the comparison is never null here.
-    if (cached?.latestVersion && compareCalVer(fetched.latestVersion, cached.latestVersion) < 0) {
+    if (cached?.latestVersion && (compareCalVer(fetched.latestVersion, cached.latestVersion) ?? 0) < 0) {
         successful = { ...attempted, latestVersion: cached.latestVersion, etag: cached.etag, lastSuccessAt: cached.lastSuccessAt };
     }
     else {
@@ -497,12 +515,12 @@ const fileExists = async (path) => {
         return true;
     }
     catch (error) {
-        if (error?.code === 'ENOENT')
+        if (errorCode(error) === 'ENOENT')
             return false;
         throw error;
     }
 };
-export const checkUpdateForSession = async ({ pluginRoot, dataRoot, event, fetchImpl, nowMs }) => {
+export const checkUpdateForSession = async ({ pluginRoot, dataRoot, event, fetchImpl, nowMs, }) => {
     try {
         if (event === null || typeof event?.sessionId !== 'string')
             return null;
@@ -529,7 +547,7 @@ export const checkUpdateForSession = async ({ pluginRoot, dataRoot, event, fetch
             await writeFile(checkedPath, '', { flag: 'wx', mode: 0o600 });
         }
         catch (error) {
-            if (error?.code === 'EEXIST')
+            if (errorCode(error) === 'EEXIST')
                 return null;
             throw error;
         }
@@ -542,7 +560,7 @@ export const checkUpdateForSession = async ({ pluginRoot, dataRoot, event, fetch
     }
 };
 const emit = (additionalContext) => `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext } })}\n`;
-export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now() }) => {
+export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now(), }) => {
     try {
         const event = validateEvent(input);
         if (event === null)
@@ -559,7 +577,7 @@ export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now() }) => 
                 ? buildChangelogDigestContext(notice.version)
                 : buildChangelogContext(notice.version, notice.added, notice.omittedEntries, notice.omittedReleases));
         }
-        if (typeof fetchImpl !== 'function')
+        if (fetchImpl === undefined)
             return '';
         const update = await checkUpdateForSession({ ...paths, event, fetchImpl, nowMs });
         if (update === null)
@@ -570,10 +588,10 @@ export const runHook = async ({ input, env, fetchImpl, nowMs = Date.now() }) => 
         return '';
     }
 };
-const readStdin = async () => {
+const readStdin = async (input) => {
     const chunks = [];
     let length = 0;
-    for await (const chunk of process.stdin) {
+    for await (const chunk of input) {
         length += chunk.byteLength;
         if (length > MAX_STDIN_BYTES)
             throw new Error('input too large');
@@ -585,7 +603,7 @@ const readStdin = async () => {
 };
 export const main = async () => {
     try {
-        const input = await readStdin();
+        const input = await readStdin(process.stdin);
         const output = await runHook({
             input,
             env: process.env,

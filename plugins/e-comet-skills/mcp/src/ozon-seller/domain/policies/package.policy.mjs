@@ -1,16 +1,14 @@
-import { parseOzonPromotionPeriod } from './promotion.policy.mjs';
 import { MAX_OZON_REPORT_PACKAGE_ITEMS } from '../constants/limits.const.mjs';
+import { parseOzonPromotionPeriod } from './promotion.policy.mjs';
+import { hasExactOwnKeys, isRecord } from '../../../shared/values.mjs';
 // Parse boundary: an item as the caller or the signed job gave it.
 const exactObject = (value, keys, message) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value))
-        throw new TypeError(message);
-    const actual = Object.keys(value);
-    if (actual.length !== keys.length || !actual.every((key) => keys.includes(key)))
+    if (!isRecord(value) || !hasExactOwnKeys(value, keys))
         throw new TypeError(message);
     return value;
 };
 // Parse boundary: the items as the caller or the signed job gave them.
-export const parseReportPackageItems = (items, { keys, parse, identity, label }) => {
+export const parseReportPackageItems = (items, { keys, parse, identity, label, }) => {
     if (!Array.isArray(items) || items.length < 1 || items.length > MAX_OZON_REPORT_PACKAGE_ITEMS) {
         throw new TypeError(`${label} must contain 1-${MAX_OZON_REPORT_PACKAGE_ITEMS} items.`);
     }

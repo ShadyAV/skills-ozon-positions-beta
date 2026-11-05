@@ -1,6 +1,7 @@
-import { ToolExecutionError } from '../../../shared/coded-error.mjs';
 import { OZON_LEASE_DEFECT, OZON_PACKAGE_FAMILIES } from '../../domain/constants/errors.const.mjs';
-import { classifyOzonAuthorizationFailure, ozonExtensionOutdatedError, ozonPackageCapabilityFailure } from '../../domain/converters/errors.converter.mjs';
+import { classifyOzonAuthorizationFailure, ozonExtensionOutdatedError, ozonPackageCapabilityFailure, } from '../../domain/converters/errors.converter.mjs';
+import { ToolExecutionError } from '../../../shared/coded-error.mjs';
+import { isRecord } from '../../../shared/values.mjs';
 // Scope revocation occurs before the release route's acknowledgement can suspend, so callers can safely
 // deliver a terminal result without letting an extension round trip delay it.
 export const releaseAuthorizationInBackground = (lease, context) => {
@@ -10,7 +11,7 @@ export const releaseAuthorizationInBackground = (lease, context) => {
     const reportFailure = (releaseError) => {
         let message;
         try {
-            message = typeof releaseError?.message === 'string' ? releaseError.message : String(releaseError);
+            message = isRecord(releaseError) && typeof releaseError.message === 'string' ? releaseError.message : String(releaseError);
         }
         catch {
             message = 'unknown release failure';
@@ -18,7 +19,7 @@ export const releaseAuthorizationInBackground = (lease, context) => {
         console.error(`[McpDispatcher] Failed to release browser-job authorization ${context}:`, message);
     };
     try {
-        void Promise.resolve(lease.release()).catch(reportFailure);
+        Promise.resolve(lease.release()).catch(reportFailure);
     }
     catch (releaseError) {
         reportFailure(releaseError);
@@ -41,7 +42,7 @@ export const createAuthorize = ({ authorization, getBridgeStatus }) => {
         }
     };
     const ozonExtensionOutdated = (status) => {
-        if (status?.extensionConnected !== true || status.ozonSellerPromotionReportSupported !== false)
+        if (!isRecord(status) || status.extensionConnected !== true || status.ozonSellerPromotionReportSupported !== false)
             return undefined;
         return ozonExtensionOutdatedError(status.extensionVersion);
     };
@@ -69,7 +70,7 @@ export const createAuthorize = ({ authorization, getBridgeStatus }) => {
             throw classifyOzonAuthorizationFailure(error, currentOzonStatus(), family);
         }
         // A lease bound to no scope cannot run the operation: that is our defect.
-        if (!lease || typeof lease.scopeId !== 'string' || typeof lease.release !== 'function') {
+        if (!lease || typeof lease.scopeId !== 'string') {
             releaseAuthorizationInBackground(lease, `after an invalid ${OZON_PACKAGE_FAMILIES[family].name} authorization`);
             throw new ToolExecutionError('OZON_AUTHORIZATION_REJECTED', `The extension returned an invalid ${OZON_PACKAGE_FAMILIES[family].name} authorization. ${OZON_LEASE_DEFECT}`, 'authorization', false);
         }

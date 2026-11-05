@@ -1,7 +1,7 @@
-import { array, boolean, integer, nonNegativeInteger, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
-import { buyerErrorProperties, buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, resultPathGuidance } from './live.mjs';
-import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
+import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { toolErrorSchema, withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
+import { array, boolean, integer, nonNegativeInteger, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
+import { buyerErrorProperties, buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, resultPathGuidance, } from './live.mjs';
 const checkProductSchema = object({
     nmId: positiveInteger,
     name: string,
@@ -38,7 +38,10 @@ const checkSuccessSchema = object({
     queries: array(checkQuerySchema),
 }, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'complete', 'product_id', 'requestsMade', 'queries']);
 const checkContract = 'Check whether one Wildberries article appears in search results for 1-100 phrases. Use for Russian requests about проверка артикула в выдаче, находится ли артикул по фразе, индексируется ли товар, or по каким запросам виден товар. ' +
-    authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance + rejectionAndHandoffGuidance +
+    authorizationWorkflow +
+    localBridgeFailureGuidance +
+    buyerOutcomeGuidance +
+    rejectionAndHandoffGuidance +
     'Authorize with job {type:"check_by_query",product_id:integer,queries:[string,...]}; send one positive product ID and 1-100 unique non-empty phrases. Page depth is fixed by the service; do not supply it. ' +
     'Read queries[] separately. For found:true, report only that the product was found for the phrase. For found:false, report only that the product was not found for the phrase. ' +
     'Do not mention pagesChecked, completionReason, page limits, or brand-filtered depth unless the user explicitly asks for diagnostics. Never present pagesChecked as a page, position, rank, or search depth in ordinary unfiltered search. ' +
@@ -54,5 +57,8 @@ export const contract = {
     inputSchema: liveInputSchema(),
     outputSchema: withRunningAnswer(withOperationDiagnostic(objectUnion(...liveAggregateSchemas(checkSuccessSchema), toolErrorSchema))),
     annotations: liveToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'wb_check_by_query'], text: `${checkContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'wb_check_by_query'],
+        text: `${checkContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

@@ -1,11 +1,9 @@
-import { localMessage, MESSAGE_TYPES } from '../../../transport/extension/wire.mjs';
 import { ozonExtensionOutdatedError } from '../../domain/converters/errors.converter.mjs';
-import { ToolExecutionError } from '../../../shared/coded-error.mjs';
 import { markOzonPackageNotStarted } from '../../domain/converters/package-result.converter.mjs';
+import { ToolExecutionError } from '../../../shared/coded-error.mjs';
+import { localMessage, MESSAGE_TYPES } from '../../../transport/extension/wire.mjs';
 /** The Ozon route: an operation goes to the extension only when it announced that operation's capability. */
-export const createOzonPromotionRoute = ({ connections, sendExtension }) => {
-    if (!connections)
-        throw new TypeError('Ozon promotion routing requires connection state.');
+export const createOzonPromotionRoute = ({ connections, sendExtension, }) => {
     return ({ requestId, authorizationId, dateFrom, dateTo, deadlineAt, family, items }) => {
         const route = family === 'promotion'
             ? {

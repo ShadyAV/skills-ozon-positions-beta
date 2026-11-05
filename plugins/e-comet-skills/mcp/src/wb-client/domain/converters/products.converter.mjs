@@ -1,24 +1,35 @@
+import { fieldOf, isPositiveSafeInteger, isUnknownArray } from '../../../shared/values.mjs';
+import { wbData } from '../policies/response.policy.mjs';
 // Parse boundary: WB answers and their products are read field by field.
-export const responseProducts = (response) => (Array.isArray(response?.data?.body?.products) ? response.data.body.products : []);
+export const responseProducts = (response) => {
+    const products = fieldOf(wbData(response, 'body'), 'products');
+    return isUnknownArray(products) ? products : [];
+};
 export const numberOrUndefined = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
-const positiveSafeIntegerOrUndefined = (value) => Number.isSafeInteger(value) && value > 0 ? value : undefined;
-const toRub = (value) => (numberOrUndefined(value) === undefined ? undefined : Math.round(value) / 100);
+export const textOrUndefined = (value) => (typeof value === 'string' ? value : undefined);
+const positiveSafeIntegerOrUndefined = (value) => (isPositiveSafeInteger(value) ? value : undefined);
+const toRub = (value) => {
+    const amount = numberOrUndefined(value);
+    return amount === undefined ? undefined : Math.round(amount) / 100;
+};
+const listOrEmpty = (value) => (isUnknownArray(value) ? value : []);
+// The price of the first size that has one, else the product's own.
+const productPrice = (product, sizes) => fieldOf(sizes.find((size) => fieldOf(size, 'price')), 'price') || fieldOf(product, 'price');
 const summarizeListingProduct = (product, position, globalPosition) => {
-    const nmId = positiveSafeIntegerOrUndefined(product?.id);
+    const nmId = positiveSafeIntegerOrUndefined(fieldOf(product, 'id'));
     if (nmId === undefined)
         return undefined;
-    const sizes = Array.isArray(product?.sizes) ? product.sizes : [];
-    const price = sizes.find((size) => size?.price)?.price || product?.price;
+    const price = productPrice(product, listOrEmpty(fieldOf(product, 'sizes')));
     const row = {
         nmId,
-        name: typeof product?.name === 'string' ? product.name : undefined,
-        brand: typeof product?.brand === 'string' ? product.brand : undefined,
-        supplierId: numberOrUndefined(product?.supplierId),
-        priceRub: price ? { basic: toRub(price.basic), product: toRub(price.product) } : undefined,
-        rating: numberOrUndefined(product?.reviewRating),
-        feedbacks: numberOrUndefined(product?.feedbacks),
-        pics: numberOrUndefined(product?.pics),
-        promoted: isPromotedViewFlags(product?.viewFlags),
+        name: textOrUndefined(fieldOf(product, 'name')),
+        brand: textOrUndefined(fieldOf(product, 'brand')),
+        supplierId: numberOrUndefined(fieldOf(product, 'supplierId')),
+        priceRub: price ? { basic: toRub(fieldOf(price, 'basic')), product: toRub(fieldOf(price, 'product')) } : undefined,
+        rating: numberOrUndefined(fieldOf(product, 'reviewRating')),
+        feedbacks: numberOrUndefined(fieldOf(product, 'feedbacks')),
+        pics: numberOrUndefined(fieldOf(product, 'pics')),
+        promoted: isPromotedViewFlags(fieldOf(product, 'viewFlags')),
         position,
     };
     if (globalPosition !== undefined && Number.isSafeInteger(globalPosition) && globalPosition > 0) {
@@ -41,36 +52,34 @@ export const projectPageProducts = (products, globalOffset, productNmIds, remain
     return selected;
 };
 export const summarizeProduct = (nmId, response) => {
-    const product = Array.isArray(response?.data?.body?.products) ? response.data.body.products[0] : undefined;
+    const product = responseProducts(response)[0];
     if (!product || typeof product !== 'object') {
         return {
             nmId,
             ok: false,
-            status: response?.data?.status,
-            error: response?.error || 'WB response did not contain a product',
+            status: wbData(response, 'status'),
+            error: fieldOf(response, 'error') || 'WB response did not contain a product',
         };
     }
-    const sizes = Array.isArray(product.sizes) ? product.sizes : [];
-    const warehouseNames = response?.warehouseNames && typeof response.warehouseNames === 'object' && !Array.isArray(response.warehouseNames)
-        ? response.warehouseNames
-        : {};
+    const sizes = listOrEmpty(fieldOf(product, 'sizes'));
+    const warehouseNames = fieldOf(response, 'warehouseNames');
     const byWarehouseMap = new Map();
     const bySize = [];
     let quantityTotal = 0;
     for (const size of sizes) {
-        const stocks = Array.isArray(size?.stocks) ? size.stocks : [];
+        const stocks = listOrEmpty(fieldOf(size, 'stocks'));
         const warehouses = new Set();
         let sizeQuantity = 0;
         for (const stock of stocks) {
-            const wh = numberOrUndefined(stock?.wh);
+            const wh = numberOrUndefined(fieldOf(stock, 'wh'));
             if (wh === undefined)
                 continue;
-            const qty = numberOrUndefined(stock?.qty) || 0;
+            const qty = numberOrUndefined(fieldOf(stock, 'qty')) || 0;
             quantityTotal += qty;
             sizeQuantity += qty;
             warehouses.add(wh);
             const current = byWarehouseMap.get(wh) || { wh, qty: 0, rows: 0 };
-            const warehouseName = typeof warehouseNames[String(wh)] === 'string' ? warehouseNames[String(wh)].trim() : '';
+            const warehouseName = textOrUndefined(fieldOf(warehouseNames, String(wh)))?.trim() ?? '';
             if (warehouseName && !current.warehouse) {
                 current.warehouse = warehouseName;
             }
@@ -79,34 +88,34 @@ export const summarizeProduct = (nmId, response) => {
             byWarehouseMap.set(wh, current);
         }
         bySize.push({
-            size: typeof size?.origName === 'string' ? size.origName : typeof size?.name === 'string' ? size.name : '',
+            size: textOrUndefined(fieldOf(size, 'origName')) ?? textOrUndefined(fieldOf(size, 'name')) ?? '',
             qty: sizeQuantity,
             warehouses: warehouses.size,
         });
     }
-    const price = sizes.find((size) => size?.price)?.price || product.price;
+    const price = productPrice(product, sizes);
     return {
-        nmId: positiveSafeIntegerOrUndefined(product.id) ?? nmId,
+        nmId: positiveSafeIntegerOrUndefined(fieldOf(product, 'id')) ?? nmId,
         ok: true,
-        name: typeof product.name === 'string' ? product.name : undefined,
-        brand: typeof product.brand === 'string' ? product.brand : undefined,
-        supplier: typeof product.supplier === 'string' ? product.supplier : undefined,
-        supplierId: numberOrUndefined(product.supplierId),
-        rating: numberOrUndefined(product.reviewRating),
-        feedbacks: numberOrUndefined(product.feedbacks),
-        pics: numberOrUndefined(product.pics),
+        name: textOrUndefined(fieldOf(product, 'name')),
+        brand: textOrUndefined(fieldOf(product, 'brand')),
+        supplier: textOrUndefined(fieldOf(product, 'supplier')),
+        supplierId: numberOrUndefined(fieldOf(product, 'supplierId')),
+        rating: numberOrUndefined(fieldOf(product, 'reviewRating')),
+        feedbacks: numberOrUndefined(fieldOf(product, 'feedbacks')),
+        pics: numberOrUndefined(fieldOf(product, 'pics')),
         priceRub: {
-            basic: toRub(price?.basic),
-            product: toRub(price?.product),
-            logistics: toRub(price?.logistics),
-            return: toRub(price?.return),
-            cashback: toRub(price?.cashback),
+            basic: toRub(fieldOf(price, 'basic')),
+            product: toRub(fieldOf(price, 'product')),
+            logistics: toRub(fieldOf(price, 'logistics')),
+            return: toRub(fieldOf(price, 'return')),
+            cashback: toRub(fieldOf(price, 'cashback')),
         },
         quantity: {
             total: quantityTotal,
             byWarehouse: [...byWarehouseMap.values()],
             bySize,
         },
-        status: response?.data?.status,
+        status: wbData(response, 'status'),
     };
 };

@@ -33,15 +33,14 @@ const RENAME_RETRY_LIMIT_MS = 3000;
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isText = (value) => typeof value === 'string' && value.length > 0;
 const brokerError = (code) => Object.assign(new Error(code), { code });
+const codeOf = (error) => (isRecord(error) ? error.code : undefined);
 // The failure record names the startup step and keeps the system code, so a bug report shows where the broker stopped.
 const stepFailure = (step) => (error) => {
-    throw Object.assign(new Error(step), { name: step, code: error?.code ?? null });
+    throw Object.assign(new Error(step), { name: step, code: codeOf(error) ?? null });
 };
-// Accepted residual "Another Windows account can open the broker pipe": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Another Windows account can open the broker pipe": docs/architecture/residuals/native-bridge.md.
 /** The endpoint shapes clients accept: a random named pipe on Windows, a socket in a private `/tmp` directory elsewhere. */
-export const createEndpointPath = async ({ platform, randomBytes, fs }) => platform === 'win32'
-    ? `\\\\.\\pipe\\e-comet-bridge-${randomBytes(16).toString('hex')}`
-    : `${await fs.mkdtemp('/tmp/e-comet-')}/b.sock`;
+export const createEndpointPath = async ({ platform, randomBytes, fs, }) => platform === 'win32' ? `\\\\.\\pipe\\e-comet-bridge-${randomBytes(16).toString('hex')}` : `${await fs.mkdtemp('/tmp/e-comet-')}/b.sock`;
 // Written next to its target and renamed, so a reader never sees a partial file. Owner-only on POSIX: the entry holds
 // the broker nonce, and the 0700 state directory is the first guard, not the only one.
 const writeJsonAtomically = async ({ fs, randomBytes }, path, value) => {
@@ -54,7 +53,7 @@ const writeJsonAtomically = async ({ fs, randomBytes }, path, value) => {
                 return;
             }
             catch (error) {
-                if (!RENAME_RETRY_CODES.has(error?.code) || Date.now() >= deadline)
+                if (!RENAME_RETRY_CODES.has(codeOf(error)) || Date.now() >= deadline)
                     throw error;
                 await new Promise((resolveDelay) => setTimeout(resolveDelay, RENAME_RETRY_MS));
             }
@@ -70,7 +69,7 @@ const writeJsonAtomically = async ({ fs, randomBytes }, path, value) => {
  * `broker.json` stamp registration writes. The rendezvous directory is `<state>/bridges`.
  * Resolves once the extension handshake has been started; `exit` is called exactly once when the broker ends.
  */
-export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now, randomBytes, net, fs, log, exit }) {
+export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now, randomBytes, net, fs, log, exit, }) {
     const rendezvous = join(resolve(brokerDir, '..', '..'), 'bridges');
     const entryPath = join(rendezvous, `${process.pid}.json`);
     const sessionNonce = randomUUID();
@@ -89,16 +88,21 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
     let socketDir = null;
     let startup = null;
     let ending = false;
-    // Accepted residual "A broker that fails before its own code runs": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "A broker that fails before its own code runs": docs/architecture/residuals/native-bridge.md.
     const writeFailureRecord = async (error) => {
         // Name and code only: a message or a stack can carry a path.
-        const record = { name: typeof error?.name === 'string' ? error.name : 'Error', code: error?.code ?? null, at: now(), brokerVersion };
+        const record = {
+            name: isRecord(error) && typeof error.name === 'string' ? error.name : 'Error',
+            code: codeOf(error) ?? null,
+            at: now(),
+            brokerVersion,
+        };
         try {
             await fs.mkdir(rendezvous, { recursive: true });
             await writeJsonAtomically({ fs, randomBytes }, join(rendezvous, `${process.pid}.failed`), record);
         }
         catch (writeError) {
-            log(`e-comet broker: failure record not written (${writeError?.code ?? 'unknown'})`);
+            log(`e-comet broker: failure record not written (${String(codeOf(writeError) ?? 'unknown')})`);
         }
     };
     const shutdown = async (exitCode, failure) => {
@@ -115,14 +119,16 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
         }));
         server?.close();
         if (failure) {
-            log(`e-comet broker: ending with ${failure.code ?? failure.name}`);
+            log(`e-comet broker: ending with ${String(codeOf(failure) ?? (isRecord(failure) ? failure.name : undefined))}`);
             await writeFailureRecord(failure);
         }
         await fs.rm(entryPath, { force: true }).catch(() => undefined);
         if (socketDir)
             await fs.rm(socketDir, { recursive: true, force: true }).catch(() => undefined);
-        const flushTimer = setTimeout(() => { for (const { socket } of clients.values())
-            socket.destroy(); }, SHUTDOWN_FLUSH_MS);
+        const flushTimer = setTimeout(() => {
+            for (const { socket } of clients.values())
+                socket.destroy();
+        }, SHUTDOWN_FLUSH_MS);
         await Promise.all(closed);
         clearTimeout(flushTimer);
         exit(exitCode);
@@ -131,7 +137,11 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
     const release = (authorizationId) => {
         if (ending)
             return;
-        stdout.write(encodeFrame({ id: `b${++brokerRequestCount}.release`, type: 'browser_job_authorization_release', payload: { authorizationId } }));
+        stdout.write(encodeFrame({
+            id: `b${++brokerRequestCount}.release`,
+            type: 'browser_job_authorization_release',
+            payload: { authorizationId },
+        }));
     };
     // A departed client's grants would hold the seller cabinet until their tokens expire, so they are released at once.
     // Returns whether the client was still known, so a caller can tell a client already being closed.
@@ -157,7 +167,7 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
     const refusal = (id, code) => ({ type: 'broker_refusal', id, code, message: REFUSAL_MESSAGES[code] });
     // A frame later in the same read can be refused again: a second end() would be a write after end, which destroys the
     // socket before the first refusal has been flushed.
-    // Accepted residual "Refused client that never reads": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Refused client that never reads": docs/architecture/residuals/native-bridge.md.
     const refuseAndClose = (client, id, code) => {
         if (!forget(client))
             return;
@@ -168,27 +178,27 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
             return;
         const id = typeof frame.id === 'string' ? frame.id : null;
         if (SESSION_CONTROL.has(String(frame.type)))
-            return void refuseAndClose(client, id, 'SESSION_CONTROL_FORBIDDEN');
+            return refuseAndClose(client, id, 'SESSION_CONTROL_FORBIDDEN');
         // The answer could not be routed back without a string id.
         if (id === null)
-            return void refuseAndClose(client, null, 'FRAME_MALFORMED');
+            return refuseAndClose(client, null, 'FRAME_MALFORMED');
         const prefixed = `${client.prefix}${id}`;
         if (prefixed.length > MAX_ID_LENGTH)
-            return void send(client, refusal(id, 'ID_TOO_LONG'));
+            return send(client, refusal(id, 'ID_TOO_LONG'));
         const authorizationId = isRecord(frame.payload) ? frame.payload.authorizationId : undefined;
         if (authorizationId !== undefined && owners.get(authorizationId) !== client) {
-            return void send(client, refusal(id, 'AUTHORIZATION_NOT_OWNED'));
+            return send(client, refusal(id, 'AUTHORIZATION_NOT_OWNED'));
         }
         const encoded = encodeFrame({ ...frame, id: prefixed });
         if (encoded.readUInt32LE(0) > MAX_HOST_TO_BROWSER_BYTES)
-            return void refuseAndClose(client, id, 'FRAME_TOO_LARGE');
+            return refuseAndClose(client, id, 'FRAME_TOO_LARGE');
         stdout.write(encoded);
         // The client released this grant itself, so it is not released again when the client leaves.
         if (frame.type === 'browser_job_authorization_release')
             owners.delete(authorizationId);
     };
     // Every extension frame for a request, results as well as stream, ack and phase frames, carries its request id.
-    // Accepted residual "Disconnected diagnostic requester": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Disconnected diagnostic requester": docs/architecture/residuals/native-bridge.md.
     const routeToClient = (frame) => {
         const id = typeof frame.id === 'string' ? frame.id : '';
         const dot = id.indexOf('.');
@@ -197,7 +207,7 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
         const granted = isRecord(result?.authorization) ? result.authorization.authorizationId : undefined;
         if (isText(granted)) {
             if (!client)
-                return void release(granted);
+                return release(granted);
             owners.set(granted, client);
         }
         if (client)
@@ -205,8 +215,10 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
     };
     const onConnection = (socket) => {
         socket.on('error', () => undefined);
-        if (ending)
-            return void socket.destroy();
+        if (ending) {
+            socket.destroy();
+            return;
+        }
         pending.add(socket);
         let client = null;
         // Nothing is written on a connection before its valid hello, not even a refusal.
@@ -215,13 +227,18 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
             maxBytes: MAX_HOST_TO_BROWSER_BYTES,
             onFrame: (frame) => {
                 if (client)
-                    return void onClientFrame(client, frame);
+                    return onClientFrame(client, frame);
                 if (!pending.delete(socket))
                     return;
                 clearTimeout(helloTimer);
                 const version = frame.clientProtocolVersion;
-                if (ending || frame.type !== 'client_hello' || !Number.isSafeInteger(version) || version < 1) {
-                    return void socket.destroy();
+                if (ending ||
+                    frame.type !== 'client_hello' ||
+                    typeof version !== 'number' ||
+                    !Number.isSafeInteger(version) ||
+                    version < 1) {
+                    socket.destroy();
+                    return;
                 }
                 client = { socket, prefix: `c${++clientCount}.` };
                 clients.set(client.prefix, client);
@@ -245,25 +262,27 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
                 forget(client);
         });
     };
-    const startSession = async () => {
+    const startSession = async (known) => {
         const endpoint = await createEndpointPath({ platform, randomBytes, fs }).catch(stepFailure('Endpoint'));
         if (platform !== 'win32')
             socketDir = dirname(endpoint);
-        server = net.createServer(onConnection);
+        const listening = net.createServer(onConnection);
+        server = listening;
         await new Promise((resolveListen, rejectListen) => {
-            server.on('error', rejectListen);
-            server.listen(endpoint, resolveListen);
+            listening.on('error', rejectListen);
+            listening.listen(endpoint, resolveListen);
         }).catch(stepFailure('Listen'));
         if (ending)
             return;
-        await fs.mkdir(rendezvous, { recursive: true })
+        await fs
+            .mkdir(rendezvous, { recursive: true })
             .then(() => writeJsonAtomically({ fs, randomBytes }, entryPath, {
             endpoint,
             pid: process.pid,
             brokerNonce,
             brokerVersion,
-            browser: facts.browser,
-            extensionVersion: facts.extensionVersion,
+            browser: known.browser,
+            extensionVersion: known.extensionVersion,
             startedAt: now(),
         }))
             .catch(stepFailure('EntryWrite'));
@@ -273,22 +292,29 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
             return;
         if (!facts) {
             const ack = frame.payload;
-            if (frame.type !== 'hello_ack' || frame.id !== HELLO_ID || !isRecord(ack) ||
-                ack.sessionNonce !== sessionNonce || ack.protocolVersion !== EXTENSION_PROTOCOL_VERSION) {
-                return void shutdown(1, brokerError('HELLO_ACK_INVALID'));
+            if (frame.type !== 'hello_ack' ||
+                frame.id !== HELLO_ID ||
+                !isRecord(ack) ||
+                ack.sessionNonce !== sessionNonce ||
+                ack.protocolVersion !== EXTENSION_PROTOCOL_VERSION) {
+                shutdown(1, brokerError('HELLO_ACK_INVALID'));
+                return;
             }
-            facts = {
+            const known = {
                 extensionVersion: typeof ack.extensionVersion === 'string' ? ack.extensionVersion : null,
-                capabilities: Array.isArray(ack.capabilities) ? ack.capabilities.filter((name) => typeof name === 'string') : [],
+                capabilities: Array.isArray(ack.capabilities)
+                    ? ack.capabilities.filter((name) => typeof name === 'string')
+                    : [],
                 protocolVersion: ack.protocolVersion,
                 browser: typeof ack.browser === 'string' ? ack.browser : 'unknown',
             };
-            startup = startSession();
+            facts = known;
+            startup = startSession(known);
             startup.catch((error) => shutdown(1, error));
             return;
         }
         if (frame.type !== 'ping')
-            return void routeToClient(frame);
+            return routeToClient(frame);
         stdout.write(encodeFrame({ id: frame.id, type: 'pong', payload: { at: now() } }));
         if (isRecord(frame.payload) && isRecord(frame.payload.browserContext)) {
             browserContext = frame.payload.browserContext;
@@ -303,7 +329,7 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
     catch (error) {
         return shutdown(1, error);
     }
-    if (!isText(stamp?.version))
+    if (!isRecord(stamp) || !isText(stamp.version))
         return shutdown(1, brokerError('STAMP_INVALID'));
     brokerVersion = stamp.version;
     // Only a development stamp, which registration writes for injected or development runs, widens the origin; one
@@ -317,15 +343,21 @@ export async function runBroker({ argv, stdin, stdout, brokerDir, platform, now,
     const reader = createFrameReader({
         maxBytes: MAX_FRAME_BYTES,
         onFrame: onExtensionFrame,
-        onError: () => void shutdown(1, brokerError('STDIO_FRAMING')),
+        onError: () => {
+            shutdown(1, brokerError('STDIO_FRAMING'));
+        },
     });
-    const portClosed = () => void shutdown(0);
+    const portClosed = () => {
+        shutdown(0);
+    };
     stdout.on('error', portClosed);
     stdin.on('error', portClosed);
-    stdin.on('data', (chunk) => { if (!ending)
-        reader.push(chunk); });
+    stdin.on('data', (chunk) => {
+        if (!ending)
+            reader.push(chunk);
+    });
     stdin.on('end', portClosed);
-    // Accepted residual "Open extension tabs delay a newer broker": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Open extension tabs delay a newer broker": docs/architecture/residuals/native-bridge.md.
     stdout.write(encodeFrame({
         id: HELLO_ID,
         type: 'hello',

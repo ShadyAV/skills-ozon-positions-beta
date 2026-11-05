@@ -1,13 +1,11 @@
-import { isRecord } from '../shared/values.mjs';
-import { ToolExecutionError } from '../shared/coded-error.mjs';
-import { MAX_BROWSER_JOB_TOKEN_BYTES } from '../transport/mcp/limits.mjs';
 import { HandoffError } from './hook-io.mjs';
+import { ToolExecutionError } from '../shared/coded-error.mjs';
+import { isRecord } from '../shared/values.mjs';
+import { MAX_BROWSER_JOB_TOKEN_BYTES } from '../transport/mcp/limits.mjs';
 const MAX_TRIGGER_URL_BYTES = 131072;
 const byteLength = (value) => Buffer.byteLength(value, 'utf8');
 export const validateTriggerUrl = (triggerUrl) => {
-    if (typeof triggerUrl !== 'string' ||
-        byteLength(triggerUrl) < 1 ||
-        byteLength(triggerUrl) > MAX_TRIGGER_URL_BYTES) {
+    if (typeof triggerUrl !== 'string' || byteLength(triggerUrl) < 1 || byteLength(triggerUrl) > MAX_TRIGGER_URL_BYTES) {
         throw new HandoffError('HANDOFF_INVALID_TOKEN', 'The browser authorization result is invalid.');
     }
     return triggerUrl;
@@ -22,7 +20,7 @@ const collectTriggerUrlCandidates = (toolResponse) => {
         catch {
             return [];
         }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+        if (!isRecord(parsed))
             return [];
         return typeof parsed.trigger_url === 'string' ? [parsed.trigger_url] : [];
     }
@@ -30,17 +28,17 @@ const collectTriggerUrlCandidates = (toolResponse) => {
     // block array.
     if (Array.isArray(toolResponse))
         return collectTriggerUrlCandidates({ content: toolResponse });
-    if (!toolResponse || typeof toolResponse !== 'object' || toolResponse.isError === true)
+    if (!isRecord(toolResponse) || toolResponse.isError === true)
         return [];
     const candidates = [];
     for (const structured of [toolResponse.structuredContent, toolResponse.structured_content]) {
-        if (structured && typeof structured === 'object' && typeof structured.trigger_url === 'string') {
+        if (isRecord(structured) && typeof structured.trigger_url === 'string') {
             candidates.push(structured.trigger_url);
         }
     }
     if (Array.isArray(toolResponse.content)) {
         for (const item of toolResponse.content) {
-            if (!item || item.type !== 'text' || typeof item.text !== 'string')
+            if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string')
                 continue;
             let parsed;
             try {
@@ -49,7 +47,7 @@ const collectTriggerUrlCandidates = (toolResponse) => {
             catch {
                 continue;
             }
-            if (parsed && typeof parsed === 'object' && typeof parsed.trigger_url === 'string') {
+            if (isRecord(parsed) && typeof parsed.trigger_url === 'string') {
                 candidates.push(parsed.trigger_url);
             }
         }
@@ -60,13 +58,21 @@ const collectTriggerUrlCandidates = (toolResponse) => {
 // Parse boundary: describes any value without reading its content.
 export const responseShape = (value, depth = 0) => {
     if (Array.isArray(value)) {
-        return depth > 2 ? `array[${value.length}]` : `array[${value.length}](${value.slice(0, 3).map((item) => responseShape(item, depth + 1)).join(',')})`;
+        return depth > 2
+            ? `array[${value.length}]`
+            : `array[${value.length}](${value
+                .slice(0, 3)
+                .map((item) => responseShape(item, depth + 1))
+                .join(',')})`;
     }
-    if (value && typeof value === 'object') {
+    if (isRecord(value)) {
         const keys = Object.keys(value);
         if (depth > 2)
             return `object{${keys.length}}`;
-        return `{${keys.slice(0, 12).map((key) => (/^[A-Za-z_]{1,40}$/.test(key) ? `${key}:${responseShape(value[key], depth + 1)}` : '?')).join(',')}}`;
+        return `{${keys
+            .slice(0, 12)
+            .map((key) => (/^[A-Za-z_]{1,40}$/.test(key) ? `${key}:${responseShape(value[key], depth + 1)}` : '?'))
+            .join(',')}}`;
     }
     return value === null ? 'null' : typeof value === 'string' ? `string(${value.length})` : typeof value;
 };
@@ -119,10 +125,12 @@ export function scrubPrivateResult(value, secrets, privateKeys, label) {
                 try {
                     return JSON.stringify(visit(JSON.parse(item)));
                 }
-                catch { /* Scrub malformed JSON as text. */ }
+                catch {
+                    /* Scrub malformed JSON as text. */
+                }
             }
             // Prose embedding an escaped copy stays literal-only: "Escaped authorization inside prose"
-            // in docs/local-agent-architecture.md#accepted-residuals.
+            // in docs/architecture/residuals/signed-flow.md.
             return retained.reduce((text, secret) => text.split(secret).join(label), item);
         }
         if (Array.isArray(item))

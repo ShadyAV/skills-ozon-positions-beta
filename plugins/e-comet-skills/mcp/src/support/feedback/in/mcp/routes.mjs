@@ -1,10 +1,13 @@
 import { assertHookFields, loadHookSecret, verifyHookSignature } from '../../../../handoff/signature.mjs';
-import { withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
-import { FeedbackPreparationError } from '../../domain/converters/errors.converter.mjs';
 import { safeArtifactId, submitError, submitOutcome } from '../../application/submit.mjs';
+import { FeedbackPreparationError } from '../../domain/converters/errors.converter.mjs';
+import { withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
 // The two MCP feedback tools decide their route here, before any use case runs: a hook-signed call is verified, an
 // unsigned one goes the unsigned route, a call that says neither is refused.
-const signatureInvalid = () => Object.assign(new Error('The trusted feedback handoff claim could not be verified.'), { code: 'FEEDBACK_CLAIM_INVALID', feedbackReason: 'claim_signature_invalid' });
+const signatureInvalid = () => Object.assign(new Error('The trusted feedback handoff claim could not be verified.'), {
+    code: 'FEEDBACK_CLAIM_INVALID',
+    feedbackReason: 'claim_signature_invalid',
+});
 /**
  * Verifies the fields the trusted hook injected against the shared local secret. A malformed request
  * fails as a binding mismatch before any filesystem access; only a well-formed one reads the secret.
@@ -43,7 +46,12 @@ input, { clientName, verifySignature }) => {
         try {
             // WHY: hook fields are only data until this process verifies the trusted signature over them.
             // Verifying first prevents a skipped or untrusted hook from reaching a transcript or artifact write.
-            await verifySignature({ tool: 'prepare_e_comet_feedback', sessionHash: feedbackSession, signature: feedbackClaim, fields: hookFields });
+            await verifySignature({
+                tool: 'prepare_e_comet_feedback',
+                sessionHash: feedbackSession,
+                signature: feedbackClaim,
+                fields: hookFields,
+            });
         }
         catch (error) {
             return { kind: 'claim_invalid', error: claimInvalid(error) };
@@ -84,7 +92,12 @@ input, { verifySignature }) => {
         try {
             // WHY: verify before artifact reads or request creation so raw transport values never confer
             // authority. The signature covers this artifactId, so a swapped one cannot reuse another grant.
-            await verifySignature({ tool: 'submit_e_comet_feedback', sessionHash: input.feedbackSession, signature: input.feedbackClaim, fields: hookFields });
+            await verifySignature({
+                tool: 'submit_e_comet_feedback',
+                sessionHash: input.feedbackSession,
+                signature: input.feedbackClaim,
+                fields: hookFields,
+            });
         }
         catch (error) {
             return submitOutcome(submitError(artifactId, 'failed', 'UPLOAD_GRANT_INVALID', 'The trusted feedback handoff claim could not be verified.', 'grant', false, error, 'claim_verification'));

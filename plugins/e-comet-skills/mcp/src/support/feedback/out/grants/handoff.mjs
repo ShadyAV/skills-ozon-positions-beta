@@ -1,16 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { FEEDBACK_ARTIFACT_RETENTION_MS as STATE_RETENTION_MS } from '../../domain/constants/limits.const.mjs';
-import { sweepExpired } from '../../../../storage/files/retention.mjs';
-import { loadHookSecret, signHookFields } from '../../../../handoff/signature.mjs';
-import { safeFeedbackProperty, withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
-import { RETRY_POLICIES, retryTransientFileOperation } from '../../../../storage/files/transient-retry.mjs';
-import { resolvePluginDataRoot } from '../../../../storage/files/layout.mjs';
-import { hashSessionId as sessionHash, isValidSessionId, SESSION_ID_MAX_BYTES } from '../../../../handoff/session.mjs';
-import { GRANT_POLICIES } from '../../../../handoff/grants/policy.mjs';
 import { createClaimMarker, ensurePrivateStoreDirectory } from '../../../../handoff/grants/file-store.mjs';
+import { GRANT_POLICIES } from '../../../../handoff/grants/policy.mjs';
+import { hashSessionId as sessionHash, isValidSessionId, SESSION_ID_MAX_BYTES } from '../../../../handoff/session.mjs';
+import { loadHookSecret, signHookFields } from '../../../../handoff/signature.mjs';
+import { resolvePluginDataRoot } from '../../../../storage/files/layout.mjs';
+import { sweepExpired } from '../../../../storage/files/retention.mjs';
+import { RETRY_POLICIES, retryTransientFileOperation } from '../../../../storage/files/transient-retry.mjs';
+import { FEEDBACK_ARTIFACT_RETENTION_MS as STATE_RETENTION_MS } from '../../domain/constants/limits.const.mjs';
 import { ARTIFACT_ID_PATTERN, CLOCK_SKEW_MS, FeedbackHandoffError, grantRefreshRequired, isFreshEntry, parseGrantEntry, parsePreparedEntry, requireGrantLifetime, SUBMIT_TARGET_TOOL, validatePreparedMetadata, validateRemoteInput, validateUploadGrant, } from '../../domain/policies/handoff.policy.mjs';
+import { safeFeedbackProperty, withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
 // The handoff's records in the host's plugin data: one prepared record and one grant per session, published by rename,
 // and the claim marker that elects one submit.
 const MAX_STATE_FILE_BYTES = 64 * 1024;
@@ -75,7 +75,7 @@ const publishState = async (path, value) => {
         await removeFile(temporaryPath).catch(() => undefined);
     }
 };
-// Reads through a symlink: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
+// Reads through a symlink: accepted residual, see docs/architecture/residuals/feedback.md.
 // Parse boundary: the record's JSON, which the domain checks.
 const readBoundedState = async (path) => {
     const metadata = await stat(path);
@@ -94,21 +94,26 @@ const readBoundedState = async (path) => {
     }
 };
 /** Read-only native recovery uses the same validated, retained state as the hooks. */
-export const readPreparedArtifact = async ({ env = process.env, sessionId, nowMs = Date.now() }) => {
+export const readPreparedArtifact = async ({ env = process.env, sessionId, nowMs = Date.now(), }) => {
     validateSessionId(sessionId);
     let entry;
     try {
         entry = parsePreparedEntry(await readBoundedState(preparedPathForSession(resolveStoreDirectory(env), sessionId)));
     }
     catch (error) {
-        if (error?.code === 'ENOENT')
+        if (safeFeedbackProperty(error, 'code') === 'ENOENT')
             return undefined;
         throw error;
     }
     if (!isFreshEntry(entry, nowMs, STATE_RETENTION_MS))
         return undefined;
-    return validatePreparedMetadata({ artifactId: entry.artifactId, kind: entry.kind, sizeBytes: entry.sizeBytes,
-        sha256: entry.sha256, transcriptIncluded: entry.transcriptIncluded });
+    return validatePreparedMetadata({
+        artifactId: entry.artifactId,
+        kind: entry.kind,
+        sizeBytes: entry.sizeBytes,
+        sha256: entry.sha256,
+        transcriptIncluded: entry.transcriptIncluded,
+    });
 };
 export const stagePreparedArtifact = async ({ dataDirectory, sessionId, metadata, nowMs = Date.now(), retentionMs = STATE_RETENTION_MS, }) => {
     validateSessionId(sessionId);
@@ -151,7 +156,7 @@ export const stageUploadGrant = async ({ dataDirectory, sessionId, remoteInput, 
     const grantPath = grantPathForSession(dataDirectory, sessionId);
     // Preserve the waiting authorization. Its presence does not establish expiry or upload outcome;
     // submit checks those before dispatch. Expired-grant replacement stays an accepted residual:
-    // docs/local-agent-architecture.md#accepted-residuals.
+    // docs/architecture/residuals/feedback.md.
     if (await stat(grantPath).then(() => true, () => false)) {
         throw new FeedbackHandoffError('FEEDBACK_GRANT_CONFLICT', 'An upload authorization is already staged for the prepared artifact in this session. Submit the same artifactId, preserving the existing history choice: that call checks expiry and any recorded upload outcome before sending. Request another authorization only if that check asks for a refresh.');
     }

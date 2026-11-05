@@ -1,45 +1,53 @@
-import { CHECK_QUERY_CONCURRENCY, DEFAULT_RETURNED_PRODUCTS, FILTER_QUERY_CONCURRENCY, MAX_RECOMMENDATION_PAGES_PER_PRODUCT, MAX_RETURNED_PRODUCTS, PRODUCT_CARD_CONCURRENCY, RECOMMENDATION_CONCURRENCY, SEARCH_CONCURRENCY } from '../domain/constants/limits.const.mjs';
-import { REQUEST_TIMEOUT_MS } from '../../shared/timeouts.mjs';
-import { FETCH_ERROR_CODES, wbaasRecoveryOutcome } from '../../transport/extension/wire.mjs';
-import { countRunProgress } from '../../shared/run-progress.mjs';
-import { closedFailureDetails } from '../../transport/failures/vocabulary.mjs';
 import { ToolExecutionError } from '../../shared/coded-error.mjs';
-import { isAllowedWbUrl } from '../domain/policies/wb-url.policy.mjs';
-import { isSuccessfulWbResponse, normalizeStatus, recommendationTotalPages } from '../domain/policies/response.policy.mjs';
-import { numberOrUndefined, projectPageProducts, responseProducts, summarizeProduct } from '../domain/converters/products.converter.mjs';
-import { completeFilters, fullListKeys, keptFilters, mergeFilters, readFiltersResponse } from '../domain/converters/filters.converter.mjs';
-import { buildCheckDescriptorUrl, buildDescriptorUrl, buildFiltersDescriptorUrl, fillTemplate, normalizeProductArticles } from '../domain/converters/descriptor-urls.converter.mjs';
+import { countRunProgress } from '../../shared/run-progress.mjs';
+import { REQUEST_TIMEOUT_MS } from '../../shared/timeouts.mjs';
+import { fieldOf, isOneOf, isPositiveSafeInteger, isRecord, isUnknownArray } from '../../shared/values.mjs';
+import { FETCH_ERROR_CODES, wbaasRecoveryOutcome } from '../../transport/extension/wire.mjs';
+import { closedFailureDetails } from '../../transport/failures/vocabulary.mjs';
 import { runWithConcurrency } from './concurrency.mjs';
 import { stoppedWbJobError, validateAuthorizedJobLimits } from './job-limits.mjs';
+import { CHECK_QUERY_CONCURRENCY, DEFAULT_RETURNED_PRODUCTS, FILTER_QUERY_CONCURRENCY, MAX_RECOMMENDATION_PAGES_PER_PRODUCT, MAX_RETURNED_PRODUCTS, PRODUCT_CARD_CONCURRENCY, RECOMMENDATION_CONCURRENCY, SEARCH_CONCURRENCY, } from '../domain/constants/limits.const.mjs';
+import { buildCheckDescriptorUrl, buildDescriptorUrl, buildFiltersDescriptorUrl, fillTemplate, normalizeProductArticles, } from '../domain/converters/descriptor-urls.converter.mjs';
+import { completeFilters, fullListKeys, keptFilters, mergeFilters, readFiltersResponse, } from '../domain/converters/filters.converter.mjs';
+import { numberOrUndefined, projectPageProducts, responseProducts, summarizeProduct, textOrUndefined, } from '../domain/converters/products.converter.mjs';
+import { isSuccessfulWbResponse, normalizeStatus, recommendationTotalPages, wbData } from '../domain/policies/response.policy.mjs';
+import { isAllowedWbUrl } from '../domain/policies/wb-url.policy.mjs';
 // Пробрасываем и отказ авторизации, и потерю транспорта: мёртвый мост — не провал
 // отдельной единицы, остальные упадут так же. Раньше при числе единиц не больше
 // параллелизма задание резолвилось как обычный «провал» без признака retryable, и
 // агент не понимал, что достаточно повторить.
 const ABORTING_STAGES = new Set(['authorization', 'extension']);
-const WB_ITEM_ERROR_CODES = Object.freeze([
-    ...Object.values(FETCH_ERROR_CODES), 'WB_FETCH_FAILED', 'WB_RATE_LIMITED', 'WB_REQUEST_FAILED',
-    'WB_UNRELIABLE_RESPONSE', 'WB_FULL_LISTS_INCOMPLETE',
-]);
+const WB_ITEM_ERROR_CODES = [
+    ...Object.values(FETCH_ERROR_CODES),
+    'WB_FETCH_FAILED',
+    'WB_RATE_LIMITED',
+    'WB_REQUEST_FAILED',
+    'WB_UNRELIABLE_RESPONSE',
+    'WB_FULL_LISTS_INCOMPLETE',
+];
 const skippedBuyerErrors = new WeakSet();
+const isSkippedBuyerError = (error) => typeof error === 'object' && error !== null && skippedBuyerErrors.has(error);
 // A buyer item's errorDetails keep only the closed timeout phase and WBAAS recovery outcome (spec 7.2, 7.4).
 const buyerEvidence = (details) => {
-    const { phase, recovery } = /** @type {any} */ (closedFailureDetails(details) ?? {});
+    const evidence = closedFailureDetails(details);
+    const phase = evidence?.phase;
+    const recovery = evidence?.recovery;
     return { ...(phase ? { phase } : {}), ...(recovery ? { recovery } : {}) };
 };
 // Parse boundary: a unit failure may be anything a fetch or a writer threw; only a coded error keeps its code.
 const buyerErrorFields = (error) => ({
-    error: error.message,
+    error: fieldOf(error, 'message'),
     errorDetails: {
-        code: error instanceof ToolExecutionError && WB_ITEM_ERROR_CODES.includes(error.code) ? error.code : 'WB_REQUEST_FAILED',
+        code: error instanceof ToolExecutionError && isOneOf(WB_ITEM_ERROR_CODES, error.code) ? error.code : 'WB_REQUEST_FAILED',
         stage: 'execution',
         retryable: error instanceof ToolExecutionError ? error.retryable : false,
         ...(error instanceof ToolExecutionError ? buyerEvidence(error.details) : {}),
     },
-    ...(skippedBuyerErrors.has(error) ? { skipped: true } : {}),
+    ...(isSkippedBuyerError(error) ? { skipped: true } : {}),
 });
 const buyerResponseErrorFields = (response) => {
-    const recovery = wbaasRecoveryOutcome(response?.wbaasRecovery);
-    if (response?.data?.status === 429) {
+    const recovery = wbaasRecoveryOutcome(fieldOf(response, 'wbaasRecovery'));
+    if (wbData(response, 'status') === 429) {
         const error = new ToolExecutionError('WB_RATE_LIMITED', 'Wildberries rate limited this job. No additional work was scheduled after this response.', 'execution', false);
         if (recovery)
             error.details = { recovery };
@@ -50,14 +58,22 @@ const buyerResponseErrorFields = (response) => {
         : {};
 };
 // The HTTP status of a failed WB answer, for check_by_query rows that otherwise keep only the text.
-const failedHttpStatus = (response) => !isSuccessfulWbResponse(response) && Number.isSafeInteger(response?.data?.status) ? { httpStatus: response.data.status } : {};
+const failedHttpStatus = (response) => {
+    const status = wbData(response, 'status');
+    return !isSuccessfulWbResponse(response) && Number.isSafeInteger(status) ? { httpStatus: status } : {};
+};
 // WB's catalog search answers no results with HTTP 200 metadata without `products`. The plain search answers
 // `products: []` instead (live WB, 2026-10-27), so only wb_check_by_query uses this.
 const isMetadataOnlyNoResult = (response) => {
-    const body = response?.data?.body;
-    return isSuccessfulWbResponse(response) && body !== null && typeof body === 'object' && typeof body.name === 'string' &&
-        typeof body.query === 'string' && body.shardKey === 'merger' && body.search_result !== null &&
-        typeof body.search_result === 'object' && !Object.hasOwn(body, 'products');
+    const body = wbData(response, 'body');
+    return (isSuccessfulWbResponse(response) &&
+        isRecord(body) &&
+        typeof body.name === 'string' &&
+        typeof body.query === 'string' &&
+        body.shardKey === 'merger' &&
+        body.search_result !== null &&
+        typeof body.search_result === 'object' &&
+        !Object.hasOwn(body, 'products'));
 };
 const rethrowAuthorizationError = (error) => {
     if (error instanceof ToolExecutionError && ABORTING_STAGES.has(error.stage)) {
@@ -66,25 +82,31 @@ const rethrowAuthorizationError = (error) => {
 };
 // Parse boundary: the card body WB answered.
 const compactCardBody = (body) => {
-    if (!body || typeof body !== 'object' || Array.isArray(body))
+    if (!isRecord(body))
         return undefined;
     return {
         imtId: numberOrUndefined(body.imt_id),
         nmId: numberOrUndefined(body.nm_id),
-        vendorCode: typeof body.vendor_code === 'string' ? body.vendor_code : undefined,
-        description: typeof body.description === 'string' ? body.description : undefined,
+        vendorCode: textOrUndefined(body.vendor_code),
+        description: textOrUndefined(body.description),
         subjectId: numberOrUndefined(body.subj_id) ?? numberOrUndefined(body.subject_id),
-        subject: typeof body.subj_name === 'string' ? body.subj_name : typeof body.subject_name === 'string' ? body.subject_name : undefined,
-        rootSubject: typeof body.subj_root_name === 'string'
-            ? body.subj_root_name
-            : typeof body.root_subject_name === 'string'
-                ? body.root_subject_name
-                : undefined,
-        options: Array.isArray(body.options) ? body.options : undefined,
-        colors: Array.isArray(body.colors) ? body.colors.filter((value) => Number.isSafeInteger(value) && value > 0) : undefined,
+        subject: textOrUndefined(body.subj_name) ?? textOrUndefined(body.subject_name),
+        rootSubject: textOrUndefined(body.subj_root_name) ?? textOrUndefined(body.root_subject_name),
+        options: isUnknownArray(body.options) ? body.options : undefined,
+        colors: isUnknownArray(body.colors) ? body.colors.filter(isPositiveSafeInteger) : undefined,
     };
 };
-const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, projection }) => {
+const hasProductList = (response) => Array.isArray(fieldOf(wbData(response, 'body'), 'products'));
+const responseTotal = (response) => numberOrUndefined(fieldOf(wbData(response, 'body'), 'total'));
+// The text a failed WB answer carries.
+const responseFailureText = (response) => fieldOf(response, 'error') || wbData(response, 'statusText');
+// The card product's identity as the check answers it; the signed article stands in for a missing id.
+const cardProductIdentity = (cardProduct, productId) => ({
+    nmId: numberOrUndefined(fieldOf(cardProduct, 'id')) ?? productId,
+    name: textOrUndefined(fieldOf(cardProduct, 'name')),
+    brand: textOrUndefined(fieldOf(cardProduct, 'brand')),
+});
+const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, projection, }) => {
     const units = job.queries.flatMap(([query, pages], queryIndex) => Array.from({ length: pages }, (_, index) => ({
         queryIndex,
         query,
@@ -99,7 +121,7 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
                 ...unit,
                 response,
                 ...buyerResponseErrorFields(response),
-                ok: isSuccessfulWbResponse(response) && Array.isArray(response?.data?.body?.products),
+                ok: isSuccessfulWbResponse(response) && hasProductList(response),
             };
         }
         catch (error) {
@@ -131,15 +153,15 @@ const executeSearchJob = async ({ authorizationId, job, requestWbFetch, writer, 
             const page = {
                 page: unit.page,
                 ok: unit.ok,
-                httpStatus: unit.response?.data?.status,
+                httpStatus: wbData(unit.response, 'status'),
                 total: products.length,
-                overallTotal: numberOrUndefined(unit.response?.data?.body?.total),
+                overallTotal: responseTotal(unit.response),
                 globalPositionsReliable: pageGlobalPositionsReliable,
                 products: selected,
             };
             if (!unit.ok) {
                 Object.assign(page, unit.errorDetails ? { errorDetails: unit.errorDetails } : {}, unit.skipped ? { skipped: true } : {});
-                page.error = unit.error || unit.response?.error || unit.response?.data?.statusText || 'WB search request failed';
+                page.error = unit.error || responseFailureText(unit.response) || 'WB search request failed';
             }
             if (!unit.ok)
                 globalPositionsReliable = false;
@@ -195,22 +217,18 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
         };
     }
     const cardProducts = responseProducts(cardResponse);
-    const cardProduct = cardProducts.find((product) => numberOrUndefined(product?.id) === productId);
-    const brandId = numberOrUndefined(cardProduct?.brandId);
+    const cardProduct = cardProducts.find((product) => numberOrUndefined(fieldOf(product, 'id')) === productId);
+    const brandId = numberOrUndefined(fieldOf(cardProduct, 'brandId'));
     if (!isSuccessfulWbResponse(cardResponse) || brandId === undefined || !Number.isSafeInteger(brandId) || brandId <= 0) {
         const error = !isSuccessfulWbResponse(cardResponse)
-            ? cardResponse?.error || cardResponse?.data?.statusText || 'WB product-card request failed'
+            ? responseFailureText(cardResponse) || 'WB product-card request failed'
             : 'WB product card did not contain a valid brand';
         return {
             ok: false,
             status: 'failed',
             complete: false,
             product_id: productId,
-            product: {
-                nmId: numberOrUndefined(cardProduct?.id) ?? productId,
-                name: typeof cardProduct?.name === 'string' ? cardProduct.name : undefined,
-                brand: typeof cardProduct?.brand === 'string' ? cardProduct.brand : undefined,
-            },
+            product: cardProductIdentity(cardProduct, productId),
             requestsMade: 1,
             queries: job.queries.map((query) => ({
                 query,
@@ -236,7 +254,7 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
             }
             catch (error) {
                 rethrowAuthorizationError(error);
-                if (skippedBuyerErrors.has(error))
+                if (isSkippedBuyerError(error))
                     searchRequestsMade -= 1;
                 await writer.append({ jobId: job.jobId, kind: 'search', query, page, url, ...buyerErrorFields(error) });
                 return {
@@ -247,7 +265,7 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
                     ...buyerErrorFields(error),
                 };
             }
-            const hasProductArray = Array.isArray(response?.data?.body?.products);
+            const hasProductArray = hasProductList(response);
             const products = hasProductArray ? responseProducts(response) : [];
             if (!isSuccessfulWbResponse(response) || (!hasProductArray && !isMetadataOnlyNoResult(response))) {
                 return {
@@ -257,10 +275,10 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
                     completionReason: 'request_failed',
                     ...failedHttpStatus(response),
                     ...buyerResponseErrorFields(response),
-                    error: response?.error || response?.data?.statusText || 'WB search request failed',
+                    error: responseFailureText(response) || 'WB search request failed',
                 };
             }
-            const position = products.findIndex((product) => numberOrUndefined(product?.id) === productId);
+            const position = products.findIndex((product) => numberOrUndefined(fieldOf(product, 'id')) === productId);
             if (position >= 0) {
                 return {
                     query,
@@ -272,7 +290,7 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
             if (products.length === 0) {
                 return { query, found: false, pagesChecked: page, completionReason: 'empty_page' };
             }
-            const fingerprint = JSON.stringify(products.map((product) => numberOrUndefined(product?.id) ?? null));
+            const fingerprint = JSON.stringify(products.map((product) => numberOrUndefined(fieldOf(product, 'id')) ?? null));
             if (fingerprint === previousFingerprint) {
                 return { query, found: false, pagesChecked: page, completionReason: 'repeated_page' };
             }
@@ -291,11 +309,7 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
         status: normalizeStatus(successfulQueries, queries.length),
         complete: successfulQueries === queries.length,
         product_id: productId,
-        product: {
-            nmId: numberOrUndefined(cardProduct?.id) ?? productId,
-            name: typeof cardProduct?.name === 'string' ? cardProduct.name : undefined,
-            brand: typeof cardProduct?.brand === 'string' ? cardProduct.brand : undefined,
-        },
+        product: cardProductIdentity(cardProduct, productId),
         requestsMade: 1 + searchRequestsMade,
         queries,
     };
@@ -303,14 +317,20 @@ const executeCheckByQueryJob = async ({ authorizationId, job, requestWbFetch, wr
 const filtersItemError = (code, message) => buyerErrorFields(new ToolExecutionError(code, message, 'execution', false));
 const filtersResponseFailure = (response) => {
     // A 200 whose body cannot be read carries statusText "OK", which names no failure.
-    const message = response?.error ||
-        (response?.data?.ok ? 'Wildberries returned an unreadable filters response' : response?.data?.statusText) ||
+    const message = fieldOf(response, 'error') ||
+        (wbData(response, 'ok') ? 'Wildberries returned an unreadable filters response' : wbData(response, 'statusText')) ||
         'WB filters request failed';
     // A failed answer keeps the anti-bot recovery outcome and its HTTP status, as the other WB rows do: over HTTP/2 the
     // browser gives no status text, so the message alone cannot tell a 498 from a 403 or a 500.
-    return response?.data?.status === 429
+    // The coded error's own message is replaced by `message` as it was answered.
+    return wbData(response, 'status') === 429
         ? { ...buyerResponseErrorFields(response), ...failedHttpStatus(response), error: message }
-        : { ...filtersItemError('WB_REQUEST_FAILED', message), ...buyerResponseErrorFields(response), ...failedHttpStatus(response), error: message };
+        : {
+            ...filtersItemError('WB_REQUEST_FAILED', String(message)),
+            ...buyerResponseErrorFields(response),
+            ...failedHttpStatus(response),
+            error: message,
+        };
 };
 // Per phrase: the filters WB shows, then one request for every truncated characteristic and category list. A decoy body or a
 // list WB did not expand is reported, never passed off as data.
@@ -327,7 +347,7 @@ const executeFiltersByQueryJob = async ({ authorizationId, job, requestWbFetch, 
         }
         catch (error) {
             rethrowAuthorizationError(error);
-            if (skippedBuyerErrors.has(error))
+            if (isSkippedBuyerError(error))
                 requestsMade -= 1;
             await writer.append({ jobId: job.jobId, kind, query, url, ...buyerErrorFields(error) });
             return { error };
@@ -337,7 +357,11 @@ const executeFiltersByQueryJob = async ({ authorizationId, job, requestWbFetch, 
     const phrases = await runWithConcurrency(job.queries, FILTER_QUERY_CONCURRENCY, countRunProgress(job.queries.length, async (query) => {
         const first = await fetchFilters(query);
         if (first.error) {
-            return { query, status: skippedBuyerErrors.has(first.error) ? 'rate_limited' : 'request_failed', ...buyerErrorFields(first.error) };
+            return {
+                query,
+                status: isSkippedBuyerError(first.error) ? 'rate_limited' : 'request_failed',
+                ...buyerErrorFields(first.error),
+            };
         }
         const listed = readFiltersResponse(first.response);
         if (listed.state === 'decoy')
@@ -352,13 +376,15 @@ const executeFiltersByQueryJob = async ({ authorizationId, job, requestWbFetch, 
         let fullFailure;
         if (keys.length > 0 && isAllowedWbUrl(buildFiltersDescriptorUrl(job, query, keys))) {
             const second = await fetchFilters(query, keys);
-            const full = second.error ? undefined : readFiltersResponse(second.response);
             if (second.error)
                 fullFailure = buyerErrorFields(second.error);
-            else if (full.state === 'genuine')
-                fullFilters = full.filters;
-            else
-                fullFailure = full.state === 'decoy' ? decoy() : filtersResponseFailure(second.response);
+            else {
+                const full = readFiltersResponse(second.response);
+                if (full.state === 'genuine')
+                    fullFilters = full.filters;
+                else
+                    fullFailure = full.state === 'decoy' ? decoy() : filtersResponseFailure(second.response);
+            }
         }
         const { filters, missing } = completeFilters(kept, fullFilters);
         const filterKeys = filters.map((filter) => filter.key);
@@ -368,7 +394,8 @@ const executeFiltersByQueryJob = async ({ authorizationId, job, requestWbFetch, 
             query,
             status: 'partial',
             filterKeys,
-            ...(fullFailure ?? filtersItemError('WB_FULL_LISTS_INCOMPLETE', 'Wildberries did not return every full value list for this phrase.')),
+            ...(fullFailure ??
+                filtersItemError('WB_FULL_LISTS_INCOMPLETE', 'Wildberries did not return every full value list for this phrase.')),
             filters,
         };
     }));
@@ -412,7 +439,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
         const detailUnit = articleUnits.find((unit) => unit.key === 'detail') || articleUnits.find((unit) => responseProducts(unit.response).length);
         const cardUnit = articleUnits.find((unit) => unit.key === 'card');
         const detail = detailUnit ? summarizeProduct(article.nm, detailUnit.response) : { nmId: article.nm, ok: false };
-        const content = compactCardBody(cardUnit?.response?.data?.body);
+        const content = compactCardBody(wbData(cardUnit?.response, 'body'));
         return {
             ...detail,
             complete: detail.ok && articleUnits.every((unit) => unit.ok),
@@ -424,8 +451,8 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
                 ...(unit.errorDetails ? { errorDetails: unit.errorDetails } : {}),
                 ...(unit.skipped ? { skipped: true } : {}),
                 ok: unit.ok,
-                httpStatus: unit.response?.data?.status,
-                error: unit.error || unit.response?.error || unit.response?.data?.statusText,
+                httpStatus: wbData(unit.response, 'status'),
+                error: unit.error || responseFailureText(unit.response),
             })),
         };
     });
@@ -440,7 +467,7 @@ const executeProductCardJob = async ({ authorizationId, job, requestWbFetch, wri
     };
 };
 const normalizeRecommendationArticles = (articles) => articles.map(([nmId, pages]) => ({ nmId, pages }));
-const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch, writer, projection }) => {
+const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch, writer, projection, }) => {
     const articles = normalizeRecommendationArticles(job.articles);
     const fetchPage = async (unit) => {
         const url = buildDescriptorUrl(job.endpoint, job.params, String(unit.nmId), unit.page);
@@ -452,7 +479,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
                 url,
                 response,
                 ...buyerResponseErrorFields(response),
-                ok: isSuccessfulWbResponse(response) && Array.isArray(response?.data?.body?.products),
+                ok: isSuccessfulWbResponse(response) && hasProductList(response),
             };
         }
         catch (error) {
@@ -469,10 +496,9 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
     const firstPages = await runWithConcurrency(articles.map((article) => ({ ...article, page: 1 })), RECOMMENDATION_CONCURRENCY, fetchPage);
     const remainingUnits = [];
     const autoDepthCapped = new Set();
-    for (const firstPage of firstPages) {
-        const discoveredPages = recommendationTotalPages(numberOrUndefined(firstPage.response?.data?.body?.total));
-        // Every first page belongs to one of the job's articles.
-        const article = articles.find((item) => item.nmId === firstPage.nmId);
+    // The first pages answer the job's articles in order.
+    for (const [index, article] of articles.entries()) {
+        const discoveredPages = recommendationTotalPages(responseTotal(firstPages[index]?.response));
         if (article.pages === undefined && discoveredPages !== null && discoveredPages > MAX_RECOMMENDATION_PAGES_PER_PRODUCT) {
             autoDepthCapped.add(article.nmId);
         }
@@ -491,7 +517,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
         let returnedProducts = 0;
         let globalPositionsReliable = true;
         const articleUnits = fetched.filter((unit) => unit.nmId === article.nmId).sort((left, right) => left.page - right.page);
-        const overallTotal = numberOrUndefined(articleUnits[0]?.response?.data?.body?.total);
+        const overallTotal = responseTotal(articleUnits[0]?.response);
         const discoveredPages = recommendationTotalPages(overallTotal);
         const pages = articleUnits.map((unit) => {
             const products = responseProducts(unit.response);
@@ -505,14 +531,14 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
             const page = {
                 page: unit.page,
                 ok: unit.ok,
-                httpStatus: unit.response?.data?.status,
+                httpStatus: wbData(unit.response, 'status'),
                 total: products.length,
                 globalPositionsReliable: pageGlobalPositionsReliable,
                 products: selected,
             };
             if (!unit.ok) {
                 Object.assign(page, unit.errorDetails ? { errorDetails: unit.errorDetails } : {}, unit.skipped ? { skipped: true } : {});
-                page.error = unit.error || unit.response?.error || unit.response?.data?.statusText || 'WB recommendation request failed';
+                page.error = unit.error || responseFailureText(unit.response) || 'WB recommendation request failed';
             }
             if (!unit.ok)
                 globalPositionsReliable = false;
@@ -548,7 +574,7 @@ const executeRecommendationsJob = async ({ authorizationId, job, requestWbFetch,
     };
 };
 export const executeAuthorizedBrowserJob = async ({ authorization, requestWbFetch, writer, productLimitPerScope = DEFAULT_RETURNED_PRODUCTS, productNmIds, }) => {
-    validateAuthorizedJobLimits(authorization);
+    const grant = validateAuthorizedJobLimits(authorization);
     const originalFetch = requestWbFetch;
     let rateLimited = false;
     let answered = 0;
@@ -561,75 +587,40 @@ export const executeAuthorizedBrowserJob = async ({ authorization, requestWbFetc
         const response = await originalFetch(...args);
         answered += 1;
         // Observe before writer I/O; in-flight requests may finish, but no new request is sent.
-        if (response?.data?.status === 429)
+        if (wbData(response, 'status') === 429)
             rateLimited = true;
         return response;
     };
     const projection = { productLimitPerScope, productNmIds };
     let result;
     try {
-        result = await executeWbJob(authorization, requestWbFetch, writer, projection);
+        result = await executeWbJob(grant, fieldOf(authorization, 'authorizationId'), requestWbFetch, writer, projection);
     }
     catch (error) {
         if (!(error instanceof ToolExecutionError))
             throw error;
-        throw stoppedWbJobError(error, authorization, answered);
+        throw stoppedWbJobError(error, grant, answered);
     }
     return {
         ...result,
         ...(rateLimited ? { stopReason: 'rate_limited' } : {}),
-        jobType: authorization.jobType,
-        jobId: authorization.job.jobId,
-        expiresAt: authorization.expiresAt,
+        jobType: grant.jobType,
+        jobId: grant.job.jobId,
+        expiresAt: fieldOf(authorization, 'expiresAt'),
     };
 };
-// Parse boundary: the checked grant; its job is the descriptor of its job type.
-const executeWbJob = async (authorization, requestWbFetch, writer, projection) => {
-    let result;
-    if (authorization.jobType === 'search_by_query') {
-        result = await executeSearchJob({
-            authorizationId: authorization.authorizationId,
-            job: authorization.job,
-            requestWbFetch,
-            writer,
-            projection,
-        });
+// The checked grant's job, run by its job type under the grant's authorization id.
+const executeWbJob = async (grant, authorizationId, requestWbFetch, writer, projection) => {
+    switch (grant.jobType) {
+        case 'search_by_query':
+            return executeSearchJob({ authorizationId, job: grant.job, requestWbFetch, writer, projection });
+        case 'check_by_query':
+            return executeCheckByQueryJob({ authorizationId, job: grant.job, requestWbFetch, writer });
+        case 'filters_by_query':
+            return executeFiltersByQueryJob({ authorizationId, job: grant.job, requestWbFetch, writer });
+        case 'product_card':
+            return executeProductCardJob({ authorizationId, job: grant.job, requestWbFetch, writer });
+        case 'recommendations_by_product':
+            return executeRecommendationsJob({ authorizationId, job: grant.job, requestWbFetch, writer, projection });
     }
-    else if (authorization.jobType === 'check_by_query') {
-        result = await executeCheckByQueryJob({
-            authorizationId: authorization.authorizationId,
-            job: authorization.job,
-            requestWbFetch,
-            writer,
-        });
-    }
-    else if (authorization.jobType === 'filters_by_query') {
-        result = await executeFiltersByQueryJob({
-            authorizationId: authorization.authorizationId,
-            job: authorization.job,
-            requestWbFetch,
-            writer,
-        });
-    }
-    else if (authorization.jobType === 'product_card') {
-        result = await executeProductCardJob({
-            authorizationId: authorization.authorizationId,
-            job: authorization.job,
-            requestWbFetch,
-            writer,
-        });
-    }
-    else if (authorization.jobType === 'recommendations_by_product') {
-        result = await executeRecommendationsJob({
-            authorizationId: authorization.authorizationId,
-            job: authorization.job,
-            requestWbFetch,
-            writer,
-            projection,
-        });
-    }
-    else {
-        throw new Error(`Unsupported browser_job type: ${authorization.jobType}`);
-    }
-    return result;
 };

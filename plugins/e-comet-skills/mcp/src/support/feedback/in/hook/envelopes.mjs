@@ -1,7 +1,7 @@
-import { MAX_MCP_MESSAGE_BYTES } from '../../../../transport/mcp/limits.mjs';
 import { readHookEvent } from '../../../../handoff/hook-io.mjs';
-import { FeedbackHandoffError } from '../../domain/policies/handoff.policy.mjs';
 import { denialReason } from '../../domain/converters/denial.converter.mjs';
+import { FeedbackHandoffError } from '../../domain/policies/handoff.policy.mjs';
+import { MAX_MCP_MESSAGE_BYTES } from '../../../../transport/mcp/limits.mjs';
 // PostToolUse can carry one maximum-size MCP request and response. Reserve another 256 KiB for the
 // host's session/tool metadata and platform paths while keeping malformed stdin decisively bounded.
 const MAX_HOOK_EVENT_BYTES = 2 * MAX_MCP_MESSAGE_BYTES + 256 * 1024;

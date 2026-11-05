@@ -7,15 +7,23 @@ import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { chosenBrowser } from '../cause.mjs';
-import { EXTENSION_ID, probeBrowserExtensionInstall } from './extension-install.mjs';
 import { EXTENSION_LOG_LIMITS } from '../limits.mjs';
-import { extensionLogFactsSchema } from '../../transport/diagnostics/facts.mjs';
-import { diagnosticCheck } from '../../transport/diagnostics/vocabulary.mjs';
+import { EXTENSION_ID, probeBrowserExtensionInstall, } from './extension-install.mjs';
 import { readLevelDbValues } from './leveldb.mjs';
 import { validateSchemaValue } from '../../shared/schema-validate.mjs';
+import { isOneOf, isRecord } from '../../shared/values.mjs';
+import { extensionLogFactsSchema } from '../../transport/diagnostics/facts.mjs';
+import { diagnosticCheck } from '../../transport/diagnostics/vocabulary.mjs';
 // The actions the extension's native-connection-log.ts writes. A row with any other action is not ours to interpret.
-export const NATIVE_LOG_ACTIONS = Object.freeze(['native_trigger', 'native_host_missing', 'native_host_found', 'native_handshake_completed',
-    'native_session_ended', 'native_start_failed', 'native_connect_refused']);
+export const NATIVE_LOG_ACTIONS = [
+    'native_trigger',
+    'native_host_missing',
+    'native_host_found',
+    'native_handshake_completed',
+    'native_session_ended',
+    'native_start_failed',
+    'native_connect_refused',
+];
 // Newer extensions keep the connection rows under their own key, the newest 100, so WB traffic cannot rotate them out of
 // the shared log; older ones have only the shared log.
 const CONNECTION_KEY = 'ecomet_native_connection_log';
@@ -40,11 +48,14 @@ export const classifyNativeClose = (text) => (typeof text === 'string' && CLOSE_
 // another kind, which the extension writes after a worker restart without a found row) ends it.
 const CLOSE_ACTIONS = new Set(['native_host_missing', 'native_session_ended', 'native_start_failed']);
 const STREAK_ENDS = new Set(['native_host_found', 'native_handshake_completed', 'native_session_ended', 'native_start_failed']);
-// Parse boundary: the rows are the extension's stored JSON, filtered field by field here.
-const nativeRows = (rows, nowMs) => rows
-    .filter((row) => row?.requestId === 'native-connection' && NATIVE_LOG_ACTIONS.includes(row.data?.action)
-    && Number.isFinite(row.timestamp) && row.timestamp <= nowMs + FUTURE_TOLERANCE_MS)
-    .sort((a, b) => a.timestamp - b.timestamp);
+const isNativeRow = (row, nowMs) => isRecord(row) &&
+    row.requestId === 'native-connection' &&
+    isRecord(row.data) &&
+    isOneOf(NATIVE_LOG_ACTIONS, row.data.action) &&
+    typeof row.timestamp === 'number' &&
+    Number.isFinite(row.timestamp) &&
+    row.timestamp <= nowMs + FUTURE_TOLERANCE_MS;
+const nativeRows = (rows, nowMs) => rows.filter((row) => isNativeRow(row, nowMs)).sort((a, b) => a.timestamp - b.timestamp);
 const project = (rows) => {
     const evidence = { startFailureAtMs: [] };
     let streak;
@@ -59,7 +70,7 @@ const project = (rows) => {
         if (action === 'native_start_failed')
             evidence.startFailureAtMs.push(at);
         // The extension writes these fields and actions; no contract pins them. Accepted residual "The extension's
-        // connection log is guarded only by the cross-repository test": docs/local-agent-architecture.md#accepted-residuals.
+        // connection log is guarded only by the cross-repository test": docs/architecture/residuals/native-bridge.md.
         if (CLOSE_ACTIONS.has(action)) {
             const handshaken = action === 'native_session_ended' || (action === 'native_start_failed' && data.handshaken === true);
             evidence.lastClose = { class: classifyNativeClose(data.reason), atMs: at, handshaken };
@@ -71,11 +82,15 @@ const project = (rows) => {
     }
     return streak ? { ...evidence, streak } : evidence;
 };
+// A key the pass read always has its result.
 const decode = (result) => {
-    if (result.state === 'absent' || result.state === 'deleted')
+    if (!result || result.state === 'absent' || result.state === 'deleted')
         return { state: 'no_log' };
     if (result.state !== 'found')
         return { state: result.state, ...(result.systemCode ? { systemCode: result.systemCode } : {}) };
+    // A found result carries its value.
+    if (!result.value)
+        return { state: 'format_unknown' };
     try {
         const rows = JSON.parse(result.value.toString('utf8'));
         return Array.isArray(rows) ? { state: 'read', rows } : { state: 'format_unknown' };
@@ -98,17 +113,21 @@ const readProfile = async (dir, options) => {
         return connection.state === 'no_log' ? history : connection;
     const shared = history.rows ?? [];
     const kept = new Set(shared.map((row) => JSON.stringify(row)));
-    return { state: 'read', native: connection.rows ?? shared,
-        rows: [...(connection.rows ?? []).filter((row) => !kept.has(JSON.stringify(row))), ...shared] };
+    return {
+        state: 'read',
+        native: connection.rows ?? shared,
+        rows: [...(connection.rows ?? []).filter((row) => !kept.has(JSON.stringify(row))), ...shared],
+    };
 };
 // Profiles used the same day tie on whole days, and the files of an unfocused profile can be the newer (stand, Chrome
 // 156), so the profile focused last goes first, then one with an open window, then the newest files; unknown use last.
-const usedBefore = (a, b) => Number(b.lastFocused === true) - Number(a.lastFocused === true)
-    || Number(b.open === true) - Number(a.open === true) || (b.lastUsedAtMs ?? 0) - (a.lastUsedAtMs ?? 0);
+const usedBefore = (a, b) => Number(b.lastFocused === true) - Number(a.lastFocused === true) ||
+    Number(b.open === true) - Number(a.open === true) ||
+    (b.lastUsedAtMs ?? 0) - (a.lastUsedAtMs ?? 0);
 // One profile: the enabled profile of the browser the cause names that was used last. A caller that knows the browser
 // (the cause it judged, the connected extension's own) passes it; otherwise the chooser picks from this probe and the
 // policies the caller passes. All of its file reads share EXTENSION_LOG_LIMITS.timeoutMs.
-const readSelected = async ({ now = Date.now, platform = process.platform, env = process.env, home = homedir(), fileSystem = fsPromises, probeExtensionInstall = probeBrowserExtensionInstall, browser = undefined, policy = null, clock = () => performance.now(), withRows = false } = {}) => {
+const readSelected = async ({ now = Date.now, platform = process.platform, env = process.env, home = homedir(), fileSystem = fsPromises, probeExtensionInstall = probeBrowserExtensionInstall, browser = undefined, policy = null, clock = () => performance.now(), withRows = false, } = {}) => {
     const profilePaths = [];
     const probe = await probeExtensionInstall({ now, platform, env, home, fileSystem, profilePaths });
     const name = browser ?? chosenBrowser({ probe, policy });
@@ -116,9 +135,16 @@ const readSelected = async ({ now = Date.now, platform = process.platform, env =
     if (!profile)
         return { evidence: { state: 'no_profile', startFailureAtMs: [] }, rows: [] };
     const join = platform === 'win32' ? win32.join : posix.join;
-    const read = await readProfile(join(profile.path, 'Local Extension Settings', EXTENSION_ID), { fileSystem, deadline: clock() + EXTENSION_LOG_LIMITS.timeoutMs, clock, withRows });
-    const install = probe?.facts?.browsers?.find((item) => item.browser === profile.browser);
-    const runningSinceMs = install?.running === true ? Date.parse(install.runningSince) : NaN;
+    const read = await readProfile(join(profile.path, 'Local Extension Settings', EXTENSION_ID), {
+        fileSystem,
+        deadline: clock() + EXTENSION_LOG_LIMITS.timeoutMs,
+        clock,
+        withRows,
+    });
+    const facts = isRecord(probe) && isRecord(probe.facts) ? probe.facts : {};
+    const browsers = Array.isArray(facts.browsers) ? facts.browsers : [];
+    const install = browsers.find((item) => isRecord(item) && item.browser === profile.browser);
+    const runningSinceMs = isRecord(install) && install.running === true ? Date.parse(String(install.runningSince)) : NaN;
     const readAtMs = now();
     const evidence = {
         state: read.state,
@@ -162,7 +188,15 @@ export const extensionLogCheck = (evidence, { observedAt, nowMs }) => {
         ...(evidence.browser === undefined ? {} : { browser: evidence.browser }),
         ...(evidence.lastTriggerAtMs === undefined ? {} : { lastTriggerAgoS: ago(evidence.lastTriggerAtMs) }),
         ...(evidence.lastHandshakeAtMs === undefined ? {} : { lastHandshakeAgoS: ago(evidence.lastHandshakeAtMs) }),
-        ...(evidence.lastClose ? { lastClose: { class: evidence.lastClose.class, agoS: ago(evidence.lastClose.atMs), handshaken: evidence.lastClose.handshaken } } : {}),
+        ...(evidence.lastClose
+            ? {
+                lastClose: {
+                    class: evidence.lastClose.class,
+                    agoS: ago(evidence.lastClose.atMs),
+                    handshaken: evidence.lastClose.handshaken,
+                },
+            }
+            : {}),
         ...(evidence.streak ? { missingStreak: { open: evidence.streak.open, startedAgoS: ago(evidence.streak.startedAtMs) } } : {}),
         startFailures: evidence.startFailureAtMs.filter((at) => since === undefined || at > since).length,
         ...(evidence.refusedAtMs === undefined ? {} : { refused: 'extension_id_mismatch' }),
@@ -170,7 +204,7 @@ export const extensionLogCheck = (evidence, { observedAt, nowMs }) => {
     if (!validateSchemaValue(facts, extensionLogFactsSchema))
         return diagnosticCheck({ ...base, state: 'unknown', cause: 'unknown' });
     const outcome = evidence.state === 'unreadable'
-        ? { state: 'failed', cause: ['EACCES', 'EPERM'].includes(evidence.systemCode) ? 'permission_denied' : 'io_error' }
+        ? { state: 'failed', cause: isOneOf(['EACCES', 'EPERM'], evidence.systemCode) ? 'permission_denied' : 'io_error' }
         : CHECK_STATES[evidence.state];
     return diagnosticCheck({ ...base, ...outcome, facts });
 };

@@ -10,6 +10,7 @@ import { delimiter, dirname, join, posix, win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { EXTENSION_ORIGIN, NATIVE_HOST_NAME } from '../native-framing.mjs';
+import { isOneOf, isRecord } from '../shared/values.mjs';
 import { resolveAccountHome } from '../storage/files/state-paths.mjs';
 const DEVELOPMENT_VERSION = '0.0.0-development';
 const BROKER_FILES = ['broker.mjs', 'native-framing.mjs'];
@@ -23,15 +24,26 @@ const RENAME_RETRY_LIMIT_MS = 3000;
 const PRUNE_MIN_AGE_MS = 60_000;
 // A staging directory lives for milliseconds; one this old was left by a process killed while staging.
 const STAGING_ORPHAN_AGE_MS = 60 * 60_000;
-// Accepted residual "Opera's native messaging registration is unverified": docs/local-agent-architecture.md#accepted-residuals.
-// Accepted residual "macOS not tested live": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Opera's native messaging registration is unverified": docs/architecture/residuals/release-and-acceptance.md.
+// Accepted residual "macOS not tested live": docs/architecture/residuals/release-and-acceptance.md.
 const MACOS_BROWSER_FOLDERS = [
-    'Google/Chrome', 'Chromium', 'Microsoft Edge', 'Yandex/YandexBrowser', 'BraveSoftware/Brave-Browser', 'com.operasoftware.Opera',
+    'Google/Chrome',
+    'Chromium',
+    'Microsoft Edge',
+    'Yandex/YandexBrowser',
+    'BraveSoftware/Brave-Browser',
+    'com.operasoftware.Opera',
 ];
 // Each browser's user data folder under the XDG configuration directory; its per-user hosts are read from inside it.
-// Accepted residual "Snap and Flatpak browsers on Linux cannot start the broker": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Snap and Flatpak browsers on Linux cannot start the broker": docs/architecture/residuals/native-bridge.md.
 const LINUX_BROWSER_FOLDERS = [
-    'google-chrome', 'chromium', 'microsoft-edge', 'yandex-browser', 'BraveSoftware/Brave-Browser', 'opera', 'vivaldi',
+    'google-chrome',
+    'chromium',
+    'microsoft-edge',
+    'yandex-browser',
+    'BraveSoftware/Brave-Browser',
+    'opera',
+    'vivaldi',
 ];
 // `linux` is the folder of managed JSON policies; Yandex Browser and Opera document none there, so they stay unobserved.
 const POLICY_BROWSERS = [
@@ -48,6 +60,8 @@ export const runBounded = (file, args, { timeout = 5000, env = undefined } = {})
 // A cold Windows PowerShell can take over ten seconds to start on a loaded machine; the bound only stops a hang.
 const REGISTRY_WRITE_TIMEOUT_MS = 60_000;
 const isText = (value) => typeof value === 'string' && value.length > 0;
+// Parse boundary: anything a step, a file call or a child process threw.
+const errorCode = (error) => (isRecord(error) ? error.code : undefined);
 const randomHex = () => randomBytes(8).toString('hex');
 // Full paths: Windows searches the working directory, which a host may set to a project folder, before PATH.
 const system32 = (env, name) => win32.join(env.SystemRoot || 'C:\\Windows', 'System32', name);
@@ -79,33 +93,45 @@ const writeWindowsRegistration = async ({ env, run, key, manifestPath }) => {
         // (a ManagementException's WMI status) or HResult is the cause. Property reads only, because ConstrainedLanguage
         // refuses method calls such as GetBaseException(). Unsigned hex, as HRESULTs are read; a negative decimal's
         // hyphen is not an identifier a bug report keeps.
-        "} catch { $e=$_.Exception; while ($e.InnerException) { $e=$e.InnerException };",
-        "$n=if ($null -ne $e.ErrorCode) { [int]$e.ErrorCode } else { $e.HResult };",
-        "Write-Output \"WMI_$($stage)_HRESULT_$('{0:X8}' -f $n)\" }",
+        '} catch { $e=$_.Exception; while ($e.InnerException) { $e=$e.InnerException };',
+        '$n=if ($null -ne $e.ErrorCode) { [int]$e.ErrorCode } else { $e.HResult };',
+        'Write-Output "WMI_$($stage)_HRESULT_$(\'{0:X8}\' -f $n)" }',
     ].join(' ');
     const { stdout } = await run(system32(env, 'WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: REGISTRY_WRITE_TIMEOUT_MS });
     const reply = stdout.replace(/^\uFEFF/, '').trim();
     const found = /^OK_(SAME|DIFFERENT|MISSING)$/.exec(reply);
     if (!found) {
         const code = /^(?:WMI_(?:CONNECT|CREATE|WRITE|READ)_(?:\d+|HRESULT_[0-9A-F]{8})|WMI_VERIFY_MISMATCH)$/.test(reply)
-            ? reply : 'REGISTRY_PROVIDER_INVALID_REPLY';
+            ? reply
+            : 'REGISTRY_PROVIDER_INVALID_REPLY';
         throw Object.assign(new Error('Native host registration was not verified'), { code });
     }
-    return { previous: found[1].toLowerCase() };
+    return { previous: found[1] === 'SAME' ? 'same' : found[1] === 'DIFFERENT' ? 'different' : 'missing' };
 };
 // Anything but a clear "not there" counts as present, so a guarded folder is attempted and reported, not skipped.
-const exists = (fs, path) => fs.stat(path).then(() => true, (error) => !['ENOENT', 'ENOTDIR'].includes(error?.code));
+const exists = (fs, path) => fs.stat(path).then(() => true, (error) => !isOneOf(['ENOENT', 'ENOTDIR'], errorCode(error)));
 // Name and code only: a message can carry a path. `name` is the registration step, which is what support needs.
-// Parse boundary: anything a step threw.
 const failure = (name, error) => {
-    const code = error?.code;
-    return { name, code: typeof code === 'string' ? code : Number.isInteger(code) ? `EXIT_${code}` : error?.killed ? 'TIMEOUT' : null };
+    const code = errorCode(error);
+    return {
+        name,
+        code: typeof code === 'string'
+            ? code
+            : Number.isInteger(code)
+                ? `EXIT_${String(code)}`
+                : isRecord(error) && error.killed
+                    ? 'TIMEOUT'
+                    : null,
+    };
 };
 const injectionHonoured = (env) => env.NODE_ENV === 'test' || env.NODE_ENV === 'development';
-const injected = (env, name) => (injectionHonoured(env) && typeof env[name] === 'string' && env[name].trim() ? env[name].trim() : null);
+const injected = (env, name) => {
+    const value = env[name];
+    return injectionHonoured(env) && typeof value === 'string' && value.trim() ? value.trim() : null;
+};
 /** Numeric dotted comparison of stamped versions; anything else, `0.0.0-development` included, compares as 0.0.0. */
 export function compareBrokerVersions(a, b) {
-    const parts = (version) => (typeof version === 'string' && /^\d+(?:\.\d+)*$/.test(version) ? version.split('.').map(Number) : [0]);
+    const parts = (version) => typeof version === 'string' && /^\d+(?:\.\d+)*$/.test(version) ? version.split('.').map(Number) : [0];
     const left = parts(a);
     const right = parts(b);
     for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
@@ -123,7 +149,7 @@ export const resolveNativeHostName = ({ env }) => injected(env, 'ECOMET_TEST_NAT
  * names, and an injected state directory alone would point the real key into a test directory. Under test only an
  * injected pair is ever written.
  */
-export const resolveRegistrationTarget = ({ env, platform, hostName, home }) => {
+export const resolveRegistrationTarget = ({ env, platform, hostName, home, }) => {
     const stateDir = injected(env, 'ECOMET_TEST_STATE_DIR');
     const key = injected(env, 'ECOMET_TEST_REGISTRY_KEY');
     const dirs = injected(env, 'ECOMET_TEST_MANIFEST_DIRS');
@@ -146,16 +172,16 @@ export const resolveRegistrationTarget = ({ env, platform, hostName, home }) => 
     const config = env.XDG_CONFIG_HOME || posix.join(home, '.config');
     return { injected: false, manifestDirs: LINUX_BROWSER_FOLDERS.map((folder) => posix.join(config, folder, 'NativeMessagingHosts')) };
 };
-// Accepted residual "A DeepSeek-only seller without Node": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "A DeepSeek-only seller without Node": docs/architecture/residuals/deepseek.md.
 /**
  * `node` from PATH, in order and without resolving links, so a version manager's upgrade does not remove it; it must
  * answer `node -v` with 22 or newer. Otherwise the registering process's own executable, which needs
  * ELECTRON_RUN_AS_NODE unless it is Node itself (DeepSeek's).
  */
-export async function resolveBrokerRuntime({ env, platform, execPath, exists: present, runNodeVersion }) {
+export async function resolveBrokerRuntime({ env, platform, execPath, exists: present, runNodeVersion, }) {
     const path = platform === 'win32' ? win32 : posix;
     const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH');
-    for (const entry of (pathKey ? env[pathKey] : '').split(platform === 'win32' ? ';' : ':')) {
+    for (const entry of (pathKey ? (env[pathKey] ?? '') : '').split(platform === 'win32' ? ';' : ':')) {
         const directory = entry.trim().replace(/^"(.*)"$/, '$1');
         if (!path.isAbsolute(directory))
             continue;
@@ -194,16 +220,17 @@ export function renderPosixLauncher({ runtimePath, electronRunAsNode }) {
         '',
     ].join('\n');
 }
-export function renderHostManifest({ hostName, launcherPath, allowedOrigin }) {
+export function renderHostManifest({ hostName, launcherPath, allowedOrigin, }) {
     return JSON.stringify({ name: hostName, description: 'e-Comet local agent bridge', path: launcherPath, type: 'stdio', allowed_origins: [allowedOrigin] }, null, 2);
 }
 // The runtime a launcher records, read back from the two shapes rendered above.
 const launcherRuntime = (text) => {
     const windows = /^"(.*)" "%~dp0broker\.mjs" %\*\r?$/m.exec(text);
+    // The group always takes part in a match.
     if (windows)
-        return windows[1].replaceAll('%%', '%');
+        return (windows[1] ?? '').replaceAll('%%', '%');
     const shell = /^exec '(.*)' "\$\(dirname "\$0"\)\/broker\.mjs" "\$@"$/m.exec(text);
-    return shell ? shell[1].replaceAll("'\\''", "'") : null;
+    return shell ? (shell[1] ?? '').replaceAll("'\\''", "'") : null;
 };
 /**
  * Whether the runtime a launcher records still runs as Node 22 or newer: `-v`, started the way the launcher starts it
@@ -213,7 +240,7 @@ const launcherRuntime = (text) => {
  * proves nothing: the launcher is shared, so it may name another host's packaged executable this process may not start
  * (EACCES, EPERM), and a timeout, an exit code or an answer that is no version say nothing about the browser's start.
  */
-export async function runtimeRuns({ run, launcherText, platform, env = process.env }) {
+export async function runtimeRuns({ run, launcherText, platform, env = process.env, }) {
     const runtime = launcherRuntime(launcherText);
     if (runtime === null)
         return false;
@@ -223,7 +250,7 @@ export async function runtimeRuns({ run, launcherText, platform, env = process.e
         ({ stdout } = await (electron ? run(runtime, ['-v'], { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } }) : run(runtime, ['-v'])));
     }
     catch (error) {
-        return error?.code === 'ENOENT' ? false : null;
+        return errorCode(error) === 'ENOENT' ? false : null;
     }
     const major = Number(/^v(\d+)\./.exec(String(stdout).trim())?.[1]);
     return Number.isInteger(major) ? major >= MIN_NODE_MAJOR : null;
@@ -238,7 +265,7 @@ const renameWithRetry = async (fs, from, to, settled = async () => false) => {
         catch (error) {
             if (await settled())
                 return;
-            if (!RENAME_RETRY_CODES.has(error?.code) || Date.now() >= deadline)
+            if (!RENAME_RETRY_CODES.has(errorCode(error)) || Date.now() >= deadline)
                 throw error;
             await delay(RENAME_RETRY_MS);
         }
@@ -264,7 +291,7 @@ const writeAtomically = async (fs, path, content, mode) => {
  * inherited ACEs with inheritable grants for the user and SYSTEM, so files already inside, such as the hook secret,
  * keep access; elsewhere mode 0700. Only icacls's exit code is checked.
  */
-export async function protectStateDirectory({ dir, platform, run, fs, env }) {
+export async function protectStateDirectory({ dir, platform, run, fs, env, }) {
     try {
         await fs.mkdir(dir, { recursive: true, mode: 0o700 });
         if (platform !== 'win32') {
@@ -285,21 +312,22 @@ export async function protectStateDirectory({ dir, platform, run, fs, env }) {
 // Stages `bridge/<dir>` as a whole through `bridge/.tmp-<hex>`. A version already in place is kept, except that under
 // NODE_ENV=development a working tree whose broker files changed, or a copy missing files, is rewritten in place.
 // Returns whether files were rewritten in place, or null when this process's own broker files are gone.
-const stageVersion = async ({ fs, srcDir, bridgeDir, ownDir, stamp, compareSources }) => {
+const stageVersion = async ({ fs, srcDir, bridgeDir, ownDir, stamp, compareSources, }) => {
     let sources;
     try {
         sources = await Promise.all(BROKER_FILES.map(async (name) => [name, await fs.readFile(join(srcDir, name))]));
     }
     catch (error) {
         // Codex deletes an older plugin version in place on update while this process keeps running from it.
-        if (error?.code === 'ENOENT')
+        if (errorCode(error) === 'ENOENT')
             return null;
         throw error;
     }
     const files = new Map([...sources, [STAMP_FILE, Buffer.from(JSON.stringify(stamp))]]);
     const staged = await Promise.all([...files.keys()].map((name) => fs.readFile(join(ownDir, name)).catch(() => null)));
     if (staged.every(Boolean)) {
-        if (!compareSources || BROKER_FILES.every((name, index) => staged[index].equals(files.get(name))))
+        // The broker files lead `files` in the order they were read.
+        if (!compareSources || sources.every(([, content], index) => staged[index]?.equals(content) === true))
             return false;
     }
     else if (!(await exists(fs, ownDir))) {
@@ -320,13 +348,11 @@ const stageVersion = async ({ fs, srcDir, bridgeDir, ownDir, stamp, compareSourc
         await writeAtomically(fs, join(ownDir, name), content);
     return true;
 };
-// The registration a manifest names: its version directory (only one inside our own bridge directory) and that
-// directory's stamp, which carries the version compared, never the directory name.
-// Parse boundary: a stamp file another version may have written.
+const isBrokerStamp = (value) => isRecord(value) && isText(value.version) && isText(value.allowedOrigin);
 const readStamp = async (fs, dir) => {
     try {
         const stamp = JSON.parse(await fs.readFile(join(dir, STAMP_FILE), 'utf8'));
-        return isText(stamp?.version) && isText(stamp.allowedOrigin) ? stamp : null;
+        return isBrokerStamp(stamp) ? stamp : null;
     }
     catch {
         return null;
@@ -335,6 +361,9 @@ const readStamp = async (fs, dir) => {
 const readRegistered = async (fs, bridgeDir, manifestPath) => {
     try {
         const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+        // dirname refuses anything but a string, which reads as no registration.
+        if (!isRecord(manifest) || typeof manifest.path !== 'string')
+            return null;
         const dir = dirname(manifest.path);
         if (dirname(dir) !== bridgeDir)
             return null;
@@ -349,8 +378,8 @@ const readRegistered = async (fs, bridgeDir, manifestPath) => {
 // has just staged survives, is not this process's own, and was last modified over a minute ago. A staging directory
 // is pruned once it is an hour old. A directory a running broker holds on Windows refuses removal; the next
 // registration tries again.
-// Accepted residual "An older plugin re-stages a pruned version directory": docs/local-agent-architecture.md#accepted-residuals.
-const prune = async ({ fs, bridgeDir, keep, registeredVersion, now }) => {
+// Accepted residual "An older plugin re-stages a pruned version directory": docs/architecture/residuals/native-bridge.md.
+const prune = async ({ fs, bridgeDir, keep, registeredVersion, now, }) => {
     const names = await fs.readdir(bridgeDir).catch(() => []);
     for (const name of names) {
         const directory = join(bridgeDir, name);
@@ -371,7 +400,7 @@ const prune = async ({ fs, bridgeDir, keep, registeredVersion, now }) => {
         }
     }
 };
-// Accepted residual "Removing the plugin leaves the broker registered": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Removing the plugin leaves the broker registered": docs/architecture/residuals/native-bridge.md.
 /**
  * Makes sure the browsers can start the broker. Idempotent and safe to run from several processes at once.
  * deps = { platform, env, stateDir, srcDir, hostName, allowedOrigin, version, execPath, home?, now, fs, run, log }
@@ -383,8 +412,16 @@ const prune = async ({ fs, bridgeDir, keep, registeredVersion, now }) => {
  */
 export async function ensureRegistration(deps) {
     const { platform, env, stateDir, srcDir, hostName, allowedOrigin, version, execPath, now, fs, run, log } = deps;
-    const result = (state, fields = {}) => ({ state, version, runtime: null,
-        manifestWrittenAtMs: null, verifiedSinceMs: null, runtimeRecheck: 'not_run', error: null, ...fields });
+    const result = (state, fields = {}) => ({
+        state,
+        version,
+        runtime: null,
+        manifestWrittenAtMs: null,
+        verifiedSinceMs: null,
+        runtimeRecheck: 'not_run',
+        error: null,
+        ...fields,
+    });
     const target = resolveRegistrationTarget({ env, platform, hostName, home: deps.home ?? resolveAccountHome() });
     if (!target)
         return result('disabled');
@@ -398,7 +435,10 @@ export async function ensureRegistration(deps) {
         const development = version === DEVELOPMENT_VERSION || target.injected || hostName !== NATIVE_HOST_NAME || allowedOrigin !== EXTENSION_ORIGIN;
         const bridgeDir = join(stateDir, 'bridge');
         const ownDir = join(bridgeDir, development
-            ? `${version}-dev-${createHash('sha256').update(allowedOrigin + hostName).digest('hex').slice(0, 8)}`
+            ? `${version}-dev-${createHash('sha256')
+                .update(allowedOrigin + hostName)
+                .digest('hex')
+                .slice(0, 8)}`
             : version);
         const stamp = { version, allowedOrigin, ...(development ? { development: true } : {}) };
         const staged = await stageVersion({ fs, srcDir, bridgeDir, ownDir, stamp, compareSources: env.NODE_ENV === 'development' });
@@ -406,7 +446,7 @@ export async function ensureRegistration(deps) {
         // Resolved before the registration is read, so the `node -v` calls do not widen the window in which a newer
         // process can register between this read and the manifest write below. What remains of that race is healed by
         // the newer version's next ensure or repair.
-        // Accepted residual "Two plugin versions registering at once": docs/local-agent-architecture.md#accepted-residuals.
+        // Accepted residual "Two plugin versions registering at once": docs/architecture/residuals/native-bridge.md.
         const runtime = await resolveBrokerRuntime({
             env,
             platform,
@@ -416,11 +456,13 @@ export async function ensureRegistration(deps) {
         });
         step = 'RegistrationRead';
         const manifestPaths = [];
+        // The one manifest the Windows key names.
+        const keyManifestPath = join(bridgeDir, `${hostName}.json`);
         if (target.key)
-            manifestPaths.push(join(bridgeDir, `${hostName}.json`));
+            manifestPaths.push(keyManifestPath);
         // A real browser gets a manifest only when its user-data folder exists; an injected folder always does.
         else
-            for (const folder of target.manifestDirs) {
+            for (const folder of target.manifestDirs ?? []) {
                 if (target.injected || (await exists(fs, dirname(folder))))
                     manifestPaths.push(join(folder, `${hostName}.json`));
             }
@@ -454,23 +496,27 @@ export async function ensureRegistration(deps) {
             step = 'Staging';
             throw Object.assign(new Error('Broker files missing'), { code: 'ENOENT' });
         }
-        const dir = takeOver ? ownDir : registered.dir;
-        const dirStamp = takeOver ? stamp : registered.stamp;
+        // Without a registration there is nothing to keep: the comparison above takes over.
+        const kept = takeOver ? null : registered;
+        const dir = kept ? kept.dir : ownDir;
+        const dirStamp = kept ? kept.stamp : stamp;
         const launcherPath = join(dir, platform === 'win32' ? 'broker.cmd' : 'broker.sh');
         let wrote = false;
         const launcherText = await fs.readFile(launcherPath, 'utf8').catch(() => '');
         const recorded = launcherRuntime(launcherText);
         let rewrite = takeOver || recorded === null || !(await exists(fs, recorded));
-        const renderLauncher = (chosen) => (platform === 'win32'
+        const renderLauncher = (chosen) => platform === 'win32'
             ? renderWindowsLauncher({ runtimePath: chosen.path, electronRunAsNode: chosen.electronRunAsNode })
-            : renderPosixLauncher({ runtimePath: chosen.path, electronRunAsNode: chosen.electronRunAsNode }));
+            : renderPosixLauncher({ runtimePath: chosen.path, electronRunAsNode: chosen.electronRunAsNode });
         // A runtime that is still there can be one that no longer runs (a downgraded Node): a repair asks it, unless this
         // pass has just asked the same PATH node while resolving the runtime. Only a runtime proven gone or too old is
         // replaced, and only by a launcher that differs: the launcher is shared, and a check that proves nothing (another
         // host's packaged executable, a timeout) leaves it as it is.
         let runtimeRecheck = 'not_run';
         if (!rewrite && deps.repair) {
-            const runs = runtime?.source === 'path_node' && runtime.path === recorded ? true : await runtimeRuns({ run, launcherText, platform, env });
+            const runs = runtime?.source === 'path_node' && runtime.path === recorded
+                ? true
+                : await runtimeRuns({ run, launcherText, platform, env });
             rewrite = runs === false && runtime !== null && renderLauncher(runtime) !== launcherText;
             runtimeRecheck = runs === null ? 'inconclusive' : runs ? 'passed' : rewrite ? 'repaired' : 'failed';
         }
@@ -501,10 +547,10 @@ export async function ensureRegistration(deps) {
             catch (error) {
                 // A browser folder can refuse this user (macOS guards them per app with EPERM; a root-owned folder answers
                 // EACCES); the other browsers can still be registered.
-                if (platform === 'win32' || !['EPERM', 'EACCES'].includes(error?.code))
+                if (platform === 'win32' || !isOneOf(['EPERM', 'EACCES'], errorCode(error)))
                     throw error;
                 // The first refusal is kept, except that macOS's guard, which has a user step, wins over any other.
-                if (!denied || (platform === 'darwin' && error.code === 'EPERM'))
+                if (!denied || (platform === 'darwin' && errorCode(error) === 'EPERM'))
                     denied = failure(step, error);
             }
         }
@@ -518,34 +564,44 @@ export async function ensureRegistration(deps) {
             // Accepted residual "Released plugins rewrite the registry stamp".
             const registryStamp = join(bridgeDir, 'registry.json');
             // Parse boundary: the stamp another plugin version may have written.
-            const stamp = await fs.readFile(registryStamp, 'utf8').then(JSON.parse).catch(() => null);
-            const matches = stamp?.key === target.key && stamp?.value === manifestPaths[0];
-            keyVerifiedSinceMs = matches && Number.isFinite(stamp.verifiedSinceMs) ? stamp.verifiedSinceMs : null;
+            const read = await fs
+                .readFile(registryStamp, 'utf8')
+                .then(JSON.parse)
+                .catch(() => null);
+            const stamp = isRecord(read) ? read : {};
+            const matches = stamp.key === target.key && stamp.value === keyManifestPath;
+            keyVerifiedSinceMs =
+                matches && typeof stamp.verifiedSinceMs === 'number' && Number.isFinite(stamp.verifiedSinceMs)
+                    ? stamp.verifiedSinceMs
+                    : null;
             if (deps.repair || !matches) {
-                const { previous } = await writeWindowsRegistration({ env, run, key: target.key, manifestPath: manifestPaths[0] });
+                const { previous } = await writeWindowsRegistration({ env, run, key: target.key, manifestPath: keyManifestPath });
                 // Only a pass that changed the time writes the stamp: one that found the key as written would put back the
                 // time it read before, over a newer one another process's repair wrote meanwhile.
-                // Accepted residual "Two processes each run a repair": docs/local-agent-architecture.md#accepted-residuals.
+                // Accepted residual "Two processes each run a repair": docs/architecture/residuals/native-bridge.md.
                 if (previous !== 'same' || keyVerifiedSinceMs === null) {
                     keyVerifiedSinceMs = now();
                     // A stamp that cannot be written only means the next start verifies the key again.
-                    await writeAtomically(fs, registryStamp, JSON.stringify({ key: target.key, value: manifestPaths[0], verifiedSinceMs: keyVerifiedSinceMs }))
-                        .catch(() => undefined);
+                    await writeAtomically(fs, registryStamp, JSON.stringify({ key: target.key, value: keyManifestPath, verifiedSinceMs: keyVerifiedSinceMs })).catch(() => undefined);
                 }
             }
         }
         // A denied folder may still name a directory this run no longer registers, so nothing is pruned then.
-        // Accepted residual "A permanent browser-folder refusal stops pruning": docs/local-agent-architecture.md#accepted-residuals.
+        // Accepted residual "A permanent browser-folder refusal stops pruning": docs/architecture/residuals/native-bridge.md.
         if (!denied)
             await prune({ fs, bridgeDir, keep: [ownDir, dir], registeredVersion: dirStamp.version, now });
         const mtimes = await Promise.all(manifestPaths.map((path) => fs.stat(path).then((info) => info.mtimeMs, () => null)));
         const written = mtimes.filter((mtime) => mtime !== null);
-        const changes = [...written, await fs.stat(launcherPath).then((info) => info.mtimeMs, () => null), keyVerifiedSinceMs].filter((at) => at !== null);
+        const changes = [
+            ...written,
+            await fs.stat(launcherPath).then((info) => info.mtimeMs, () => null),
+            keyVerifiedSinceMs,
+        ].filter((at) => at !== null);
         // Only macOS's per-app folder guard has a step for the user (System Settings). Any other refusal fails the
         // registration only when no browser folder took the manifest: a failed registration is the cause of every
         // missing broker, and a seller whose own browser is registered must still hear that it is closed. The refusal
         // stays in `error` either way.
-        // Accepted residual "A refused folder is weighed against any registered browser, not the seller's": docs/local-agent-architecture.md#accepted-residuals.
+        // Accepted residual "A refused folder is weighed against any registered browser, not the seller's": docs/architecture/residuals/native-bridge.md.
         const refused = denied && (platform === 'darwin' && denied.code === 'EPERM' ? 'denied' : registeredFolders === 0 ? 'failed' : null);
         return result(refused || (wrote ? 'registered' : 'current'), {
             runtime: runtime?.source ?? null,
@@ -567,12 +623,11 @@ export const repairRegistration = (deps) => ensureRegistration({ ...deps, repair
 // The three policies that decide whether a browser may start our host, each null when unset or unreadable: whether
 // NativeMessagingUserLevelHosts allows hosts registered per user, and the NativeMessagingBlocklist and
 // NativeMessagingAllowlist host names. `failed` marks a read that observed nothing, which is not "no policy".
-const UNSET = Object.freeze({ allowed: null, blocklist: null, allowlist: null, failed: false });
+const UNSET = { allowed: null, blocklist: null, allowlist: null, failed: false };
 // reg.exe and plutil exit 1 for a key or file that does not exist, whatever the system language; a timeout, a tool
 // that cannot start or any other exit is a read that failed.
-// Parse boundary: anything a policy read threw.
-const readFailed = (error) => error?.code !== 1;
-const hostList = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string') : null);
+const readFailed = (error) => errorCode(error) !== 1;
+const hostList = (value) => Array.isArray(value) ? value.filter((item) => typeof item === 'string') : null;
 // One `reg query <key> /s` per root prints the vendor key and every subkey under its full root name. Only the vendor
 // key's DWORD and the REG_SZ values of its exact list subkeys are read: Chromium honours these policies only when they
 // are mandatory, so `\Recommended` and every other subkey are ignored.
@@ -592,8 +647,11 @@ const readWindowsPolicy = async ({ run, env, vendor }) => {
             return found;
         }
         const key = `${REGISTRY_ROOTS[root]}\\Software\\Policies\\${vendor}`.toLowerCase();
-        const sections = { [key]: 'allowed', [`${key}\\nativemessagingblocklist`]: 'blocklist',
-            [`${key}\\nativemessagingallowlist`]: 'allowlist' };
+        const sections = {
+            [key]: 'allowed',
+            [`${key}\\nativemessagingblocklist`]: 'blocklist',
+            [`${key}\\nativemessagingallowlist`]: 'allowlist',
+        };
         let section = null;
         for (const line of stdout.split(/\r?\n/)) {
             if (/^HKEY_/i.test(line)) {
@@ -603,7 +661,8 @@ const readWindowsPolicy = async ({ run, env, vendor }) => {
             const value = /^ {4}(.+?) {4}(REG_[A-Z_]+) {4}(.*)$/.exec(line);
             if (!value || !section)
                 continue;
-            const [, name, type, data] = value;
+            // Every group takes part in a match.
+            const [, name = '', type = '', data = ''] = value;
             if (section === 'allowed' && type === 'REG_DWORD' && name.toLowerCase() === 'nativemessaginguserlevelhosts') {
                 found.allowed = Number.parseInt(data, 16) !== 0;
             }
@@ -615,8 +674,12 @@ const readWindowsPolicy = async ({ run, env, vendor }) => {
     };
     const [machine, user] = await Promise.all([query('HKLM'), query('HKCU')]);
     // Machine policy wins over user policy, per policy.
-    return { allowed: machine.allowed ?? user.allowed, blocklist: machine.blocklist ?? user.blocklist, allowlist: machine.allowlist ?? user.allowlist,
-        failed: machine.failed || user.failed };
+    return {
+        allowed: machine.allowed ?? user.allowed,
+        blocklist: machine.blocklist ?? user.blocklist,
+        allowlist: machine.allowlist ?? user.allowlist,
+        failed: machine.failed || user.failed,
+    };
 };
 // Each policy is taken from the first plist that sets it, the user's before the computer's.
 const readMacPolicy = async ({ run, user, bundle }) => {
@@ -652,7 +715,7 @@ const readMacPolicy = async ({ run, user, bundle }) => {
 };
 // Every JSON file in the folder is a source; a false anywhere wins, because then the browser may ignore user hosts, and
 // a list in any file applies.
-const readLinuxPolicy = async ({ dir, fs }) => {
+const readLinuxPolicy = async ({ dir, fs, }) => {
     // Parse boundary: managed policy files are any JSON an administrator wrote, read field by field.
     let policies = [];
     try {
@@ -660,7 +723,8 @@ const readLinuxPolicy = async ({ dir, fs }) => {
         const names = await fs.readdir(dir);
         policies = await Promise.all(names.map(async (name) => {
             try {
-                return JSON.parse((await fs.readFile(posix.join(dir, name), 'utf8')).replace(/^\uFEFF/, ''));
+                const policy = JSON.parse((await fs.readFile(posix.join(dir, name), 'utf8')).replace(/^\uFEFF/, ''));
+                return policy;
             }
             catch {
                 return null; // An unreadable or malformed file sets nothing.
@@ -670,19 +734,26 @@ const readLinuxPolicy = async ({ dir, fs }) => {
     catch {
         // No folder, or one that cannot be read: nothing observed.
     }
-    const values = policies.map((policy) => policy?.NativeMessagingUserLevelHosts).filter((value) => typeof value === 'boolean');
+    const values = policies
+        .map((policy) => (isRecord(policy) ? policy.NativeMessagingUserLevelHosts : undefined))
+        .filter((value) => typeof value === 'boolean');
     const merged = (name) => {
-        const lists = policies.map((policy) => hostList(policy?.[name])).filter((list) => list !== null);
+        const lists = policies
+            .map((policy) => hostList(isRecord(policy) ? policy[name] : undefined))
+            .filter((list) => list !== null);
         return lists.length === 0 ? null : lists.flat();
     };
     // A file this user cannot read is one the browser, running as the same user, cannot read either: no read failure.
-    return { allowed: values.length === 0 ? null : !values.includes(false), blocklist: merged('NativeMessagingBlocklist'), allowlist: merged('NativeMessagingAllowlist'),
-        failed: false };
+    return {
+        allowed: values.length === 0 ? null : !values.includes(false),
+        blocklist: merged('NativeMessagingBlocklist'),
+        allowlist: merged('NativeMessagingAllowlist'),
+        failed: false,
+    };
 };
 // Chromium MessageService::IsNativeMessagingHostAllowed: a block list holding "*" or the host blocks it unless the
 // allow list names it; null when no block list was read.
-const blocksHost = ({ blocklist, allowlist }, hostName) => (blocklist === null ? null
-    : (blocklist.includes('*') || blocklist.includes(hostName)) && !(allowlist ?? []).includes(hostName));
+const blocksHost = ({ blocklist, allowlist }, hostName) => blocklist === null ? null : (blocklist.includes('*') || blocklist.includes(hostName)) && !(allowlist ?? []).includes(hostName);
 const accountName = () => {
     try {
         return userInfo().username;
@@ -691,19 +762,29 @@ const accountName = () => {
         return '';
     }
 };
-// Accepted residual "Per-user native hosts forbidden by policy": docs/local-agent-architecture.md#accepted-residuals.
-// Accepted residual "Managed native-messaging block and allow lists": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Per-user native hosts forbidden by policy": docs/architecture/residuals/native-bridge.md.
+// Accepted residual "Managed native-messaging block and allow lists": docs/architecture/residuals/native-bridge.md.
 /**
  * Per browser, whether its NativeMessagingUserLevelHosts policy allows user-level hosts (`allowed`) and whether its
  * NativeMessagingBlocklist and NativeMessagingAllowlist block `hostName` (`hostBlocked`): true, false or null (unset).
  * `readFailed: true` when a read observed nothing (a timeout, a tool that did not start), so a null there is unknown.
  */
-export async function readUserLevelHostsPolicy({ platform, run, env = process.env, user = accountName(), fs = { readdir, readFile }, hostName = NATIVE_HOST_NAME }) {
+export async function readUserLevelHostsPolicy({ platform, run, env = process.env, user = accountName(), fs = { readdir, readFile }, hostName = NATIVE_HOST_NAME, }) {
     return Promise.all(POLICY_BROWSERS.map(async ({ browser, vendor, bundle, linux }) => {
         const policy = platform === 'win32'
             ? await readWindowsPolicy({ run, env, vendor })
-            : platform === 'darwin' ? (user ? await readMacPolicy({ run, user, bundle }) : UNSET)
-                : platform === 'linux' && linux ? await readLinuxPolicy({ dir: linux, fs }) : UNSET;
-        return { browser, allowed: policy.allowed, hostBlocked: blocksHost(policy, hostName), ...(policy.failed ? { readFailed: true } : {}) };
+            : platform === 'darwin'
+                ? user
+                    ? await readMacPolicy({ run, user, bundle })
+                    : UNSET
+                : platform === 'linux' && linux
+                    ? await readLinuxPolicy({ dir: linux, fs })
+                    : UNSET;
+        return {
+            browser,
+            allowed: policy.allowed,
+            hostBlocked: blocksHost(policy, hostName),
+            ...(policy.failed ? { readFailed: true } : {}),
+        };
     }));
 }

@@ -1,9 +1,9 @@
-import { ozonPackageAuthorizationWorkflow, ozonPackageError, ozonPromotionArtifactSchema, ozonTriggerUrlProperty, packageItemSchemas, packageResultSchema, promotionPeriodFields, reportToolAnnotations } from './reports.mjs';
-import { OZON_PROMOTION_TERMINAL_CODE_STAGES } from '../../transport/failures/vocabulary.mjs';
-import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, packageSafety, rejectionAndHandoffGuidance, reportDeliveryGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
-import { array, object } from '../../transport/mcp/schema.mjs';
+import { ozonPackageAuthorizationWorkflow, ozonPackageError, ozonPromotionArtifactSchema, ozonTriggerUrlProperty, packageItemSchemas, packageResultSchema, promotionPeriodFields, reportToolAnnotations, } from './reports.mjs';
 import { MAX_OZON_REPORT_PACKAGE_ITEMS } from '../domain/constants/limits.const.mjs';
+import { OZON_PROMOTION_TERMINAL_CODE_STAGES } from '../../transport/failures/vocabulary.mjs';
+import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, packageSafety, rejectionAndHandoffGuidance, reportDeliveryGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
+import { array, object } from '../../transport/mcp/schema.mjs';
 const promotionPackageItems = packageItemSchemas(promotionPeriodFields, ozonPromotionArtifactSchema, ozonPackageError(OZON_PROMOTION_TERMINAL_CODE_STAGES));
 const promotionPackageContract = 'Download an ordered package of up to 50 Ozon Seller promotion analytics XLSX workbooks. ' +
     ozonPackageAuthorizationWorkflow('ozon_seller_promotion_reports', 'periods:[{dateFrom,dateTo},...]') +
@@ -18,7 +18,8 @@ export const contract = {
     name: 'ozon_seller_promotion_reports',
     description: 'Download an ordered package of Ozon Seller promotion report XLSX workbooks for requested periods. ' +
         signedDiscovery('ozon_seller_promotion_reports', 'ozon_seller_promotion_reports') +
-        packageSafety + completeContractGuidance,
+        packageSafety +
+        completeContractGuidance,
     inputSchema: object({
         periods: array(object(promotionPeriodFields, ['dateFrom', 'dateTo']), {
             minItems: 1,
@@ -29,5 +30,8 @@ export const contract = {
     }, ['periods']),
     outputSchema: withRunningAnswer(withOperationDiagnostic(packageResultSchema('ozon_seller_promotion_reports', 'periods', promotionPackageItems))),
     annotations: reportToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'ozon_seller_promotion_reports'], text: `${promotionPackageContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'ozon_seller_promotion_reports'],
+        text: `${promotionPackageContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

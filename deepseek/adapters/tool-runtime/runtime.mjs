@@ -1,15 +1,15 @@
 import { isDeepStrictEqual } from 'node:util';
 import { claimLocalAuthorization } from '../../../plugins/e-comet-skills/mcp/src/handoff/browser-job.mjs';
-import { createMemoryGrantStore } from '../../../plugins/e-comet-skills/mcp/src/handoff/grants/memory-store.mjs';
-import { HandoffError } from '../../../plugins/e-comet-skills/mcp/src/handoff/hook-io.mjs';
-import { LOCAL_TOOL_BY_BROWSER_JOB_TYPE as TARGETS } from '../../../plugins/e-comet-skills/mcp/src/handoff/grants/policy.mjs';
-import { SESSION_ID_MAX_BYTES } from '../../../plugins/e-comet-skills/mcp/src/handoff/session.mjs';
 import { extractTriggerUrl } from '../../../plugins/e-comet-skills/mcp/src/handoff/call-result.mjs';
 import { scrubPrivateResult } from '../../../plugins/e-comet-skills/mcp/src/handoff/call-result.mjs';
+import { createMemoryGrantStore } from '../../../plugins/e-comet-skills/mcp/src/handoff/grants/memory-store.mjs';
+import { LOCAL_TOOL_BY_BROWSER_JOB_TYPE as TARGETS } from '../../../plugins/e-comet-skills/mcp/src/handoff/grants/policy.mjs';
+import { HandoffError } from '../../../plugins/e-comet-skills/mcp/src/handoff/hook-io.mjs';
+import { SESSION_ID_MAX_BYTES } from '../../../plugins/e-comet-skills/mcp/src/handoff/session.mjs';
+import { isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 const REMOTE = 'mcp__e-comet__browser_job';
 const LOCAL_PREFIX = 'mcp__e-comet-local__';
-const SIGNED = new Set(Object.values(TARGETS).map(name => LOCAL_PREFIX + name));
-const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const SIGNED = new Set(Object.values(TARGETS).map((name) => LOCAL_PREFIX + name));
 // The native host persists Error text, not arbitrary Error.code properties.
 // Use the existing closed JSON outcome format so feedback retains the handoff cause.
 export const failure = (code, message, stage = 'handoff', extra = {}) => Object.assign(new Error(JSON.stringify({ ok: false, code, stage, ...extra, message })), { code });
@@ -36,7 +36,7 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
         if (feedback.tools.has(exec.name))
             feedback.validate(exec);
         if (SIGNED.has(exec.name)) {
-            if (!record(exec.arguments))
+            if (!isRecord(exec.arguments))
                 throw failure('HANDOFF_INVALID_INPUT', 'Local tool arguments must be an object.');
             if (Object.hasOwn(exec.arguments, 'triggerUrl') || Object.hasOwn(exec.arguments, 'trigger_url'))
                 throw failure('HANDOFF_MODEL_AUTHORIZATION', 'Remove model-authored authorization fields; the native adapter injects them privately.');
@@ -52,7 +52,7 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
             validate(exec);
         }
         catch (error) {
-            return { kind: 'deny', reason: error.message };
+            return { kind: 'deny', reason: isRecord(error) ? error.message : undefined };
         }
         const decision = await next();
         // ToolRuntime resolves native ask approvals after this waterfall. Its execution
@@ -92,8 +92,17 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
     // The browser-job flow's own claim step over the memory store: one use, the hook's lifetime and refusals.
     async function authorizeLocal(exec) {
         try {
+            const effective = await claimLocalAuthorization({
+                store: grants,
+                sessionId: sessionId(exec),
+                toolName: exec.name,
+                toolInput: exec.arguments,
+                nowMs: now(),
+            });
             // A DeepSeek tool is never a Cowork device call, so the claim always returns the input with its authorization.
-            return await claimLocalAuthorization({ store: grants, sessionId: sessionId(exec), toolName: exec.name, toolInput: exec.arguments, nowMs: now() });
+            if (!effective)
+                throw new TypeError('The local authorization claim returned no input.');
+            return effective;
         }
         catch (error) {
             if (error instanceof HandoffError)
@@ -104,7 +113,9 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
     function wrapToolDefinition(definition) {
         if (!relevant(definition.name))
             return definition;
-        const wrapped = { ...definition, async execute(args, exec) {
+        const wrapped = {
+            ...definition,
+            async execute(args, exec) {
                 attest(exec);
                 if (feedback.tools.has(exec.name))
                     return feedback.run(exec, definition.execute.bind(definition));
@@ -112,14 +123,15 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
                     const effective = await authorizeLocal(exec);
                     if (exec.signal.aborted)
                         throw failure('HANDOFF_CANCELLED', 'The native call was cancelled before local dispatch.');
+                    let message;
                     try {
                         return sanitize(await definition.execute(effective, exec), effective.triggerUrl);
                     }
                     catch (error) {
-                        const message = error instanceof Error ? error.message : 'The local MCP call failed.';
-                        // A string comes back a string.
-                        throw new Error(sanitize(message, effective.triggerUrl));
+                        message = error instanceof Error ? error.message : 'The local MCP call failed.';
                     }
+                    // A string comes back a string. The failure carries no cause: the original holds the unsanitized authorization.
+                    throw new Error(String(sanitize(message, effective.triggerUrl)));
                 }
                 const raw = await definition.execute(args, exec);
                 if (exec.name !== REMOTE)
@@ -133,13 +145,16 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
                 }
                 if (!token)
                     throw failure('HANDOFF_TOKEN_NOT_FOUND', 'The remote browser authorization contained no usable token.');
-                const target = Object.hasOwn(TARGETS, args?.job?.type) ? TARGETS[args.job.type] : undefined;
+                const job = isRecord(args) ? args.job : undefined;
+                const type = isRecord(job) ? job.type : undefined;
+                const target = typeof type === 'string' && Object.hasOwn(TARGETS, type) ? TARGETS[type] : undefined;
                 if (!target)
                     throw failure('HANDOFF_INVALID_TOOL', 'The remote job type has no supported local tool.');
                 const safe = sanitize(raw, token);
                 drafts.set(exec.token, { session: sessionId(exec), target, safe, token, createdAt: now() });
                 return safe;
-            } };
+            },
+        };
         if (definition.name === REMOTE) {
             // A bridge projector must never restore its cached, unsanitized upstream result.
             delete wrapped.projectContent;
@@ -152,7 +167,11 @@ export function createAdapter({ dataDirectory, now = Date.now, feedback, updates
         const draft = drafts.get(exec.token);
         drafts.delete(exec.token);
         permitted.delete(exec.token);
-        if (!draft || outcome.isError || exec.signal.aborted || draft.session !== sessionId(exec) || !isDeepStrictEqual(outcome.value, draft.safe))
+        if (!draft ||
+            outcome.isError ||
+            exec.signal.aborted ||
+            draft.session !== sessionId(exec) ||
+            !isDeepStrictEqual(outcome.value, draft.safe))
             return;
         grants.stage({ sessionId: draft.session, targetTool: draft.target, triggerUrl: draft.token, nowMs: draft.createdAt });
     }

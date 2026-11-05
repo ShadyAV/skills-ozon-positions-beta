@@ -1,17 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { RESULT_MAX_FILE_BYTES, RESULT_RETENTION_MS } from '../limits.mjs';
-import { sweepExpired } from '../files/retention.mjs';
-import { currentStorageLayout, requireStorageTarget } from '../files/layout.mjs';
 import { UUID_V4 } from '../../shared/values.mjs';
+import { currentStorageLayout, requireStorageTarget } from '../files/layout.mjs';
+import { sweepExpired } from '../files/retention.mjs';
+import { RESULT_MAX_FILE_BYTES, RESULT_RETENTION_MS } from '../limits.mjs';
 const RESULT_JOB_ID_FILE_PART_LENGTH = 128;
 // The one NDJSON grammar of this root: `<safe-job>-<uuid>.ndjson`, and that name plus `.part` while it is
 // being written. Only these two spellings are ours: a `.part` of some other program in a relocated root,
 // and whatever an older release left behind, are never touched.
 const RESULT_FILE_PATTERN = new RegExp(`^[a-zA-Z0-9_-]{1,${RESULT_JOB_ID_FILE_PART_LENGTH}}-${UUID_V4}\\.ndjson$`);
 const RESULT_PARTIAL_PATTERN = new RegExp(`^[a-zA-Z0-9_-]{1,${RESULT_JOB_ID_FILE_PART_LENGTH}}-${UUID_V4}\\.ndjson\\.part$`);
-const safeFilePart = (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, RESULT_JOB_ID_FILE_PART_LENGTH);
+const safeFilePart = (value) => String(value)
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, RESULT_JOB_ID_FILE_PART_LENGTH);
 const normalizeError = (error) => (error instanceof Error ? error : new Error(String(error)));
 const isSweptResultName = (name, entry) => !entry.isDirectory() && (RESULT_PARTIAL_PATTERN.test(name) || RESULT_FILE_PATTERN.test(name));
 const sweepResults = (directory, { retentionMs, now }) => sweepExpired({ directory, ownName: isSweptResultName, retentionMs, now });
@@ -29,7 +31,7 @@ const clock = (now) => (typeof now === 'function' ? now : () => now);
  * Sweeps exactly one root: the current results root by default, or any directory the caller names.
  */
 export const pruneResults = async ({ resultDir = undefined, storageTarget = currentStorageLayout().results, now = Date.now(), retentionMs = RESULT_RETENTION_MS, } = {}) => sweepResults(resultDir ?? requireStorageTarget(storageTarget, 'results'), { retentionMs, now });
-export const createJobWriter = async (jobId, { resultDir = undefined, storageTarget = currentStorageLayout().results, maxFileBytes = RESULT_MAX_FILE_BYTES, retentionMs = RESULT_RETENTION_MS, now = Date.now } = {}) => {
+export const createJobWriter = async (jobId, { resultDir = undefined, storageTarget = currentStorageLayout().results, maxFileBytes = RESULT_MAX_FILE_BYTES, retentionMs = RESULT_RETENTION_MS, now = Date.now, } = {}) => {
     resultDir ??= requireStorageTarget(storageTarget, 'results');
     const nowMs = clock(now);
     await ensurePrivateDirectory(resultDir);
@@ -47,8 +49,12 @@ export const createJobWriter = async (jobId, { resultDir = undefined, storageTar
     let released = false;
     return {
         resultPath,
-        get published() { return published; },
-        get persistedBytes() { return persistedBytes; },
+        get published() {
+            return published;
+        },
+        get persistedBytes() {
+            return persistedBytes;
+        },
         append(record) {
             if (closed)
                 return Promise.resolve();
@@ -87,7 +93,7 @@ export const createJobWriter = async (jobId, { resultDir = undefined, storageTar
                     writeErrors.push(normalizeError(error));
                 }
                 // Housekeeping after the response, never part of it: sweep errors stay in stderr.
-                void sweepResults(resultDir, { retentionMs, now: nowMs() });
+                sweepResults(resultDir, { retentionMs, now: nowMs() });
                 return [...writeErrors];
             })();
             return closePromise;

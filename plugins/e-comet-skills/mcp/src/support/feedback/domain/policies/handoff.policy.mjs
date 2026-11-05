@@ -1,9 +1,9 @@
 import { isAbsolute } from 'node:path';
+import { UUID_V4, isNonNegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../../../../shared/values.mjs';
 import { FEEDBACK_MAX_BYTES as MAX_FEEDBACK_ARCHIVE_BYTES } from '../constants/limits.const.mjs';
-import { MAX_MCP_MESSAGE_BYTES } from '../../../../transport/mcp/limits.mjs';
 import { foldFeedbackLineEndings, redactFeedbackText } from '../converters/report.converter.mjs';
 import { isPublishableObjectKey } from './upload-destination.policy.mjs';
-import { UUID_V4, isRecord } from '../../../../shared/values.mjs';
+import { MAX_MCP_MESSAGE_BYTES } from '../../../../transport/mcp/limits.mjs';
 // The rules of the feedback handoff a hook or the native adapter applies around the feedback tools: prepared and grant
 // records, report_issue's grant, the trusted transcript path and the wire budget of a prepared report.
 const MAX_TRANSCRIPT_PATH_BYTES = 4096;
@@ -12,6 +12,7 @@ export const ARTIFACT_ID_PATTERN = new RegExp(`^${UUID_V4}$`);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 // The hook is dependency-free, so mirror the exact remote report_issue enum at this trust boundary.
 export const FEEDBACK_KINDS = new Set(['bug', 'wrong_data', 'missing_capability', 'unclear_contract']);
+export const isFeedbackKind = (value) => FEEDBACK_KINDS.has(value);
 export const SUBMIT_TARGET_TOOL = 'submit_e_comet_feedback';
 const MAX_UPLOAD_URL_BYTES = 8 * 1024;
 const MAX_REQUIRED_HEADERS = 32;
@@ -34,57 +35,46 @@ export class FeedbackHandoffError extends Error {
     }
 }
 const byteLength = (value) => Buffer.byteLength(value, 'utf8');
-export const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 // The closed code and message of a handoff error this module raised, or undefined for any other value.
-export const ownedHandoffError = (error) => ownedErrors.get(error);
+export const ownedHandoffError = (error) => (typeof error === 'object' && error !== null ? ownedErrors.get(error) : undefined);
 // Parse boundary: a record from a tool result or from disk, checked here.
 export const validatePreparedMetadata = (metadata) => {
     if (!isRecord(metadata) ||
-        Object.keys(metadata).sort().join('\0') !==
-            ['artifactId', 'kind', 'sha256', 'sizeBytes', 'transcriptIncluded'].sort().join('\0') ||
+        Object.keys(metadata).sort().join('\0') !== ['artifactId', 'kind', 'sha256', 'sizeBytes', 'transcriptIncluded'].sort().join('\0') ||
         typeof metadata.artifactId !== 'string' ||
         !ARTIFACT_ID_PATTERN.test(metadata.artifactId) ||
-        !FEEDBACK_KINDS.has(metadata.kind) ||
-        !Number.isSafeInteger(metadata.sizeBytes) ||
-        metadata.sizeBytes < 1 ||
+        !isFeedbackKind(metadata.kind) ||
+        !isPositiveSafeInteger(metadata.sizeBytes) ||
         metadata.sizeBytes > MAX_FEEDBACK_ARCHIVE_BYTES ||
         typeof metadata.sha256 !== 'string' ||
         !SHA256_PATTERN.test(metadata.sha256) ||
         typeof metadata.transcriptIncluded !== 'boolean') {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_PREPARED', 'The prepared feedback metadata is invalid.');
     }
-    return { ...metadata };
+    const { artifactId, kind, sizeBytes, sha256, transcriptIncluded } = metadata;
+    return { artifactId, kind, sizeBytes, sha256, transcriptIncluded };
 };
 // Parse boundary: a record read from disk, checked here.
 export const parsePreparedEntry = (entry) => {
     if (!isRecord(entry) ||
         Object.keys(entry).sort().join('\0') !==
-            [
-                'artifactId',
-                'createdAtMs',
-                'kind',
-                'sha256',
-                'sizeBytes',
-                'targetTool',
-                'transcriptIncluded',
-                'type',
-                'version',
-            ].sort().join('\0') ||
+            ['artifactId', 'createdAtMs', 'kind', 'sha256', 'sizeBytes', 'targetTool', 'transcriptIncluded', 'type', 'version']
+                .sort()
+                .join('\0') ||
         entry.version !== 1 ||
         entry.type !== 'prepared' ||
         entry.targetTool !== SUBMIT_TARGET_TOOL ||
-        !Number.isSafeInteger(entry.createdAtMs) ||
-        entry.createdAtMs < 0) {
+        !isNonNegativeSafeInteger(entry.createdAtMs)) {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_STATE', 'The feedback handoff state is invalid.');
     }
-    validatePreparedMetadata({
+    const metadata = validatePreparedMetadata({
         artifactId: entry.artifactId,
         kind: entry.kind,
         sizeBytes: entry.sizeBytes,
         sha256: entry.sha256,
         transcriptIncluded: entry.transcriptIncluded,
     });
-    return entry;
+    return { version: 1, type: 'prepared', targetTool: SUBMIT_TARGET_TOOL, createdAtMs: entry.createdAtMs, ...metadata };
 };
 const cloneHeaders = (entries) => {
     const headers = {};
@@ -130,11 +120,11 @@ export const normalizeExpiresAt = (value, nowMs) => {
             }
         }
     }
-    if (!Number.isSafeInteger(expiresAt) ||
+    if (expiresAt === undefined ||
+        !Number.isSafeInteger(expiresAt) ||
         expiresAt < 1 ||
         expiresAt > MAX_EXPIRES_AT_SECONDS ||
-        !Number.isSafeInteger(nowMs) ||
-        nowMs < 0 ||
+        !isNonNegativeSafeInteger(nowMs) ||
         expiresAt * 1000 <= nowMs) {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_GRANT', 'The feedback upload grant is invalid.');
     }
@@ -143,19 +133,17 @@ export const normalizeExpiresAt = (value, nowMs) => {
 // Parse boundary: a grant from report_issue or from disk, checked here.
 export const validateUploadGrant = (grant, { nowMs, expectedSize, allowExpired = false }) => {
     if (!isRecord(grant) ||
-        Object.keys(grant).sort().join('\0') !==
-            ['expiresAt', 'objectKey', 'requiredHeaders', 'uploadUrl'].sort().join('\0') ||
+        Object.keys(grant).sort().join('\0') !== ['expiresAt', 'objectKey', 'requiredHeaders', 'uploadUrl'].sort().join('\0') ||
         typeof grant.uploadUrl !== 'string' ||
         byteLength(grant.uploadUrl) < 1 ||
         byteLength(grant.uploadUrl) > MAX_UPLOAD_URL_BYTES ||
+        typeof grant.objectKey !== 'string' ||
         !isPublishableObjectKey(grant.objectKey) ||
         !isRecord(grant.requiredHeaders) ||
-        !Number.isSafeInteger(grant.expiresAt) ||
-        grant.expiresAt < 1 ||
+        !isPositiveSafeInteger(grant.expiresAt) ||
         grant.expiresAt > MAX_EXPIRES_AT_SECONDS ||
-        !allowExpired && grant.expiresAt * 1000 <= nowMs ||
-        !Number.isSafeInteger(expectedSize) ||
-        expectedSize < 1 ||
+        (!allowExpired && grant.expiresAt * 1000 <= nowMs) ||
+        !isPositiveSafeInteger(expectedSize) ||
         expectedSize > MAX_FEEDBACK_ARCHIVE_BYTES) {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_GRANT', 'The feedback upload grant is invalid.');
     }
@@ -174,6 +162,7 @@ export const validateUploadGrant = (grant, { nowMs, expectedSize, allowExpired =
         throw new FeedbackHandoffError('FEEDBACK_INVALID_GRANT', 'The feedback upload grant is invalid.');
     }
     const seen = new Set();
+    const headers = [];
     for (const [name, value] of entries) {
         const normalized = name.toLowerCase();
         if (!HEADER_NAME_PATTERN.test(name) ||
@@ -184,15 +173,16 @@ export const validateUploadGrant = (grant, { nowMs, expectedSize, allowExpired =
             seen.has(normalized) ||
             normalized === 'transfer-encoding' ||
             PROTOTYPE_SPECIAL_HEADER_NAMES.has(normalized) ||
-            normalized === 'content-length' && value !== String(expectedSize)) {
+            (normalized === 'content-length' && value !== String(expectedSize))) {
             throw new FeedbackHandoffError('FEEDBACK_INVALID_GRANT', 'The feedback upload grant is invalid.');
         }
         seen.add(normalized);
+        headers.push([name, value]);
     }
     const validated = {
         uploadUrl: grant.uploadUrl,
         objectKey: grant.objectKey,
-        requiredHeaders: cloneHeaders(entries),
+        requiredHeaders: cloneHeaders(headers),
         expiresAt: grant.expiresAt,
     };
     if (byteLength(JSON.stringify(validated)) > MAX_GRANT_PAYLOAD_BYTES) {
@@ -227,9 +217,8 @@ export const parseGrantEntry = (entry, { nowMs, retentionMs, allowExpired = fals
         entry.version !== 1 ||
         entry.type !== 'grant' ||
         entry.targetTool !== SUBMIT_TARGET_TOOL ||
-        !Number.isSafeInteger(entry.createdAtMs) ||
-        entry.createdAtMs < 0 ||
-        !isFreshEntry(entry, nowMs, retentionMs)) {
+        !isNonNegativeSafeInteger(entry.createdAtMs) ||
+        !isFreshEntry({ createdAtMs: entry.createdAtMs }, nowMs, retentionMs)) {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_STATE', 'The feedback handoff state is invalid.');
     }
     const metadata = validatePreparedMetadata({
@@ -252,19 +241,15 @@ export const isFreshEntry = (entry, nowMs, retentionMs) => entry.createdAtMs <= 
 export const validateRemoteInput = (remoteInput) => {
     if (!isRecord(remoteInput) ||
         Object.keys(remoteInput).sort().join('\0') !== ['kind', 'size_bytes'].sort().join('\0') ||
-        !FEEDBACK_KINDS.has(remoteInput.kind) ||
-        !Number.isSafeInteger(remoteInput.size_bytes) ||
-        remoteInput.size_bytes < 1 ||
+        !isFeedbackKind(remoteInput.kind) ||
+        !isPositiveSafeInteger(remoteInput.size_bytes) ||
         remoteInput.size_bytes > MAX_FEEDBACK_ARCHIVE_BYTES) {
         throw new FeedbackHandoffError('FEEDBACK_INVALID_INPUT', 'The remote feedback arguments are invalid.');
     }
     return { kind: remoteInput.kind, sizeBytes: remoteInput.size_bytes };
 };
 export const validateTranscriptPath = (path) => {
-    if (typeof path !== 'string' ||
-        byteLength(path) < 1 ||
-        byteLength(path) > MAX_TRANSCRIPT_PATH_BYTES ||
-        !isAbsolute(path)) {
+    if (typeof path !== 'string' || byteLength(path) < 1 || byteLength(path) > MAX_TRANSCRIPT_PATH_BYTES || !isAbsolute(path)) {
         throw new FeedbackHandoffError('FEEDBACK_TRANSCRIPT_UNAVAILABLE', 'The trusted feedback transcript is unavailable.');
     }
     return path;
@@ -279,27 +264,29 @@ const shortenReportMiddle = (text, retained) => {
     let head = Math.ceil(retained / 2);
     let tail = text.length - Math.floor(retained / 2);
     // Keep surrogate pairs intact without materializing a code-point array of a huge report.
-    if (head > 0 && /[\uD800-\uDBFF]/u.test(text[head - 1]) && /[\uDC00-\uDFFF]/u.test(text[head] ?? ''))
+    if (head > 0 && /[\uD800-\uDBFF]/u.test(text[head - 1] ?? '') && /[\uDC00-\uDFFF]/u.test(text[head] ?? ''))
         head -= 1;
-    if (tail > 0 && /[\uD800-\uDBFF]/u.test(text[tail - 1]) && /[\uDC00-\uDFFF]/u.test(text[tail] ?? ''))
+    if (tail > 0 && /[\uD800-\uDBFF]/u.test(text[tail - 1] ?? '') && /[\uDC00-\uDFFF]/u.test(text[tail] ?? ''))
         tail += 1;
     return text.slice(0, head) + REPORT_SHORTENING_MARKER + text.slice(tail);
 };
 // Every route fits the report to the host wire envelope the native route has to satisfy.
-// Parse boundary: the preparation's arguments, already checked against the tool's input schema.
 export const fitPrepareWireInput = (input, transportFields = {
-    feedbackClaim: 'a'.repeat(43), feedbackSession: 'a'.repeat(64),
+    feedbackClaim: 'a'.repeat(43),
+    feedbackSession: 'a'.repeat(64),
 }) => {
-    const fits = (value) => byteLength(JSON.stringify({ ...value, ...transportFields }))
-        <= MAX_MCP_MESSAGE_BYTES - FEEDBACK_ENVELOPE_RESERVE_BYTES;
+    const fits = (value) => byteLength(JSON.stringify({ ...value, ...transportFields })) <= MAX_MCP_MESSAGE_BYTES - FEEDBACK_ENVELOPE_RESERVE_BYTES;
     if (fits(input))
         return input;
     // Cutting a header/key away from its credential value defeats contextual redaction.
     // Redact whole source fields before any cut, then bind only the final safe text. Line endings are
     // folded first, exactly as the canonical report does: redacting lone-CR text unfolded would treat
     // the whole report as one header line and swallow its contents into a single redaction.
-    let fitted = { ...input,
-        summary: redactFeedbackText(foldFeedbackLineEndings(input.summary)), details: redactFeedbackText(foldFeedbackLineEndings(input.details)) };
+    let fitted = {
+        ...input,
+        summary: redactFeedbackText(foldFeedbackLineEndings(input.summary)),
+        details: redactFeedbackText(foldFeedbackLineEndings(input.details)),
+    };
     // Details are the ordinary oversized field. Summary is only a last resort when
     // it alone exhausts the budget; normal inputs and the trusted transcript path stay unchanged.
     for (const field of ['details', 'summary']) {

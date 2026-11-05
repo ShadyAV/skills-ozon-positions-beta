@@ -1,6 +1,7 @@
 import { compareCalVer, normalizeCalVer } from '../../../plugins/e-comet-skills/mcp/src/plugin-update/domain/policies/calver.policy.mjs';
-import { readProfileUpdate } from './policy.mjs';
+import { isOneOf, isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES } from '../../../plugins/e-comet-skills/mcp/src/transport/failures/evidence.mjs';
+import { readProfileUpdate } from './policy.mjs';
 // A closed failure the host shows the model as the tool's result (the tool runtime adapter has its own).
 const failure = (code, message, stage = 'handoff', extra = {}) => Object.assign(new Error(JSON.stringify({ ok: false, code, stage, ...extra, message })), { code });
 const PACKAGE = 'dsh-e-comet-skills';
@@ -9,13 +10,19 @@ const METADATA_TIMEOUT_MS = 10_000;
 // The Host stays open for days: a release is noticed within hours, and a failed read retries sooner
 // with backoff so one npm outage cannot leave the card stale or hammer the registry.
 const RECHECK_INTERVAL_MS = 6 * 60 * 60_000;
-const RETRY_DELAYS_MS = Object.freeze([60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000]);
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+// The default reads need the host context; without one they throw.
+const hostContext = (ctx) => {
+    if (!ctx)
+        throw new TypeError('The DeepSeek host context is unavailable.');
+    return ctx;
+};
 const exactVersion = (value) => {
     const components = normalizeCalVer(value);
     return components !== null && components.join('.') === value;
 };
 /** Read-only scheduled/manual checks. Only the private UI can request the captured exact npm version. */
-export function createUpdates({ ctx, currentVersion = '0.0.0-development', readMetadata = options => readProfileUpdate(ctx, options), installBundle = spec => ctx.get('pluginManager').installBundle(spec), metadataTimeoutMs = METADATA_TIMEOUT_MS, recheckIntervalMs = RECHECK_INTERVAL_MS, retryDelaysMs = RETRY_DELAYS_MS } = {}) {
+export function createUpdates({ ctx, currentVersion = '0.0.0-development', readMetadata = (options) => readProfileUpdate(hostContext(ctx), options), installBundle = (spec) => hostContext(ctx).get('pluginManager').installBundle(spec), metadataTimeoutMs = METADATA_TIMEOUT_MS, recheckIntervalMs = RECHECK_INTERVAL_MS, retryDelaysMs = RETRY_DELAYS_MS, } = {}) {
     let snapshot = { state: 'checking', currentVersion };
     let check;
     let disposed = false;
@@ -28,13 +35,18 @@ export function createUpdates({ ctx, currentVersion = '0.0.0-development', readM
     const metadataAbort = new AbortController();
     const getStatus = () => ({ ...snapshot, toolActive: activeTools > 0 });
     const halted = () => snapshot.state === 'restart-required' || snapshot.errorCode === 'recovery-required';
-    const unref = (timer) => { timer.unref?.(); return timer; };
+    const unref = (timer) => {
+        timer.unref?.();
+        return timer;
+    };
     function scheduleCheck() {
         clearTimeout(nextCheck);
         if (disposed || halted())
             return;
         const delay = failedChecks ? retryDelaysMs[Math.min(failedChecks, retryDelaysMs.length) - 1] : recheckIntervalMs;
-        nextCheck = unref(setTimeout(() => { void checkUpdates(); }, delay));
+        nextCheck = unref(setTimeout(() => {
+            checkUpdates();
+        }, delay));
     }
     function checkUpdates() {
         if (disposed || installation || halted())
@@ -52,20 +64,27 @@ export function createUpdates({ ctx, currentVersion = '0.0.0-development', readM
                     return;
                 }
                 // Both sides passed exactVersion, so the comparison is never null.
-                snapshot = compareCalVer(installedVersion, metadata.version) < 0
-                    ? { state: metadata.version === rejectedVersion ? 'error' : 'available', currentVersion: installedVersion,
-                        availableVersion: metadata.version, ...(metadata.version === rejectedVersion ? { errorCode: 'host-incompatible' } : {}) }
-                    : { state: 'current', currentVersion: installedVersion };
+                snapshot =
+                    (compareCalVer(installedVersion, metadata.version) ?? 0) < 0
+                        ? {
+                            state: metadata.version === rejectedVersion ? 'error' : 'available',
+                            currentVersion: installedVersion,
+                            availableVersion: metadata.version,
+                            ...(metadata.version === rejectedVersion ? { errorCode: 'host-incompatible' } : {}),
+                        }
+                        : { state: 'current', currentVersion: installedVersion };
             }
             catch {
                 snapshot = { state: 'error', currentVersion: installedVersion, errorCode: 'check-failed' };
             }
-        })().finally(() => {
+        })()
+            .finally(() => {
             check = undefined;
             // Count observations, not timer scheduling: installation also schedules after its eligibility check.
             failedChecks = snapshot.state === 'error' && snapshot.errorCode !== 'host-incompatible' ? failedChecks + 1 : 0;
             scheduleCheck();
-        }).then(() => getStatus());
+        })
+            .then(() => getStatus());
         return check;
     }
     function installUpdate() {
@@ -94,34 +113,53 @@ export function createUpdates({ ctx, currentVersion = '0.0.0-development', readM
                     snapshot = { state: 'restart-required', currentVersion: installedVersion, availableVersion: version };
                 else if (result?.error?.code === 'incompatible-version') {
                     rejectedVersion = version;
-                    snapshot = { state: 'error', currentVersion: installedVersion, availableVersion: version, errorCode: 'host-incompatible' };
+                    snapshot = {
+                        state: 'error',
+                        currentVersion: installedVersion,
+                        availableVersion: version,
+                        errorCode: 'host-incompatible',
+                    };
                 }
                 else
                     snapshot = { state: 'error', currentVersion: installedVersion, availableVersion: version, errorCode: 'install-failed' };
                 return { ...getStatus(), result };
             }
             catch (error) {
-                snapshot = { state: 'error', currentVersion: installedVersion, availableVersion: version, errorCode: error.code === 'ECOMET_UPDATE_RECOVERY_FAILED' ? 'recovery-required' : 'install-failed' };
+                // What installSafely throws when it cannot restore the previous files.
+                const recovery = isRecord(error) ? error : {};
+                snapshot = {
+                    state: 'error',
+                    currentVersion: installedVersion,
+                    availableVersion: version,
+                    errorCode: recovery.code === 'ECOMET_UPDATE_RECOVERY_FAILED' ? 'recovery-required' : 'install-failed',
+                };
                 if (snapshot.errorCode === 'recovery-required') {
-                    const systemCode = error.cause?.code;
+                    const systemCode = isRecord(recovery.cause) ? recovery.cause.code : undefined;
                     try {
-                        ctx.logger?.error('ECOMET_UPDATE_RECOVERY_FAILED: %s', JSON.stringify({
-                            backupDirectory: error.backupDirectory,
-                            ...(FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES.includes(systemCode) ? { systemCode } : {}),
+                        hostContext(ctx).logger?.error('ECOMET_UPDATE_RECOVERY_FAILED: %s', JSON.stringify({
+                            backupDirectory: recovery.backupDirectory,
+                            ...(isOneOf(FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, systemCode) ? { systemCode } : {}),
                         }));
                     }
-                    catch { /* A failed diagnostic sink must not hide the terminal recovery state. */ }
+                    catch {
+                        /* A failed diagnostic sink must not hide the terminal recovery state. */
+                    }
                     return getStatus();
                 }
                 throw error;
             }
-        })().finally(() => { installation = undefined; scheduleCheck(); });
+        })().finally(() => {
+            installation = undefined;
+            scheduleCheck();
+        });
         return installation;
     }
     async function runTool(execute) {
         if (snapshot.state === 'updating' || halted())
-            throw failure('ECOMET_UPDATE_IN_PROGRESS', snapshot.errorCode === 'recovery-required' ? 'An e-Comet update failed and the previous files could not be restored. Ask the user to contact e-Comet support; do not retry e-Comet tools.'
-                : snapshot.state === 'restart-required' ? 'An e-Comet update is installed. Ask the user to restart DeepSeek (Application → Exit, then open it again) before using e-Comet tools; this call was not started.'
+            throw failure('ECOMET_UPDATE_IN_PROGRESS', snapshot.errorCode === 'recovery-required'
+                ? 'An e-Comet update failed and the previous files could not be restored. Ask the user to contact e-Comet support; do not retry e-Comet tools.'
+                : snapshot.state === 'restart-required'
+                    ? 'An e-Comet update is installed. Ask the user to restart DeepSeek (Application → Exit, then open it again) before using e-Comet tools; this call was not started.'
                     : 'e-Comet is installing an update. Wait for it to finish, then retry; this call was not started.', 'update');
         activeTools++;
         try {
@@ -131,6 +169,10 @@ export function createUpdates({ ctx, currentVersion = '0.0.0-development', readM
             activeTools--;
         }
     }
-    function dispose() { disposed = true; clearTimeout(nextCheck); metadataAbort.abort(); }
+    function dispose() {
+        disposed = true;
+        clearTimeout(nextCheck);
+        metadataAbort.abort();
+    }
     return { checkUpdates, getStatus, installUpdate, runTool, dispose };
 }

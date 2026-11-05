@@ -1,27 +1,27 @@
+import { invalidArgumentsMessage, validateArguments } from '../../../mcp-protocol/registry/validate.mjs';
 import { deliverReportResult } from '../../../mcp-protocol/results/links.mjs';
 import { textResult } from '../../../mcp-protocol/results/serialize.mjs';
-import { invalidArgumentsMessage, validateArguments } from '../../../mcp-protocol/registry/validate.mjs';
-import { ToolExecutionError } from '../../../shared/coded-error.mjs';
-import { StorageUnavailableError } from '../../../shared/storage-unavailable.mjs';
 import { executeOzonPromotionJob, getOzonPromotionArtifactResource } from '../../application/promotion.mjs';
 import { contract } from '../../contract/promotion-report.contract.mjs';
-import { OZON_PROMOTION_OPERATION_MAX_MS } from '../../domain/constants/limits.const.mjs';
 import { OZON_LEASE_DEFECT } from '../../domain/constants/errors.const.mjs';
-import { classifyOzonAuthorizationFailure, isOzonPackageCapabilityFailure, safeOzonPromotionToolError } from '../../domain/converters/errors.converter.mjs';
+import { OZON_PROMOTION_OPERATION_MAX_MS } from '../../domain/constants/limits.const.mjs';
+import { classifyOzonAuthorizationFailure, isOzonPackageCapabilityFailure, safeOzonPromotionToolError, } from '../../domain/converters/errors.converter.mjs';
 import { parseOzonPromotionPeriod } from '../../domain/policies/promotion.policy.mjs';
 import { releaseAuthorizationInBackground } from './authorize.mjs';
+import { ToolExecutionError } from '../../../shared/coded-error.mjs';
+import { StorageUnavailableError } from '../../../shared/storage-unavailable.mjs';
+import { isRecord } from '../../../shared/values.mjs';
 /**
  * ozon_seller_promotion_report: one signed promotion workbook for one period. The period is checked before anything else,
  * an extension that does not announce the promotion capability is refused before and after the broker wait so its
  * one-use authorization is not spent, and the operation runs under the lease through the promotion state machine.
  */
-export const createPromotionReportTool = ({ answer, authorization, authorize, ozonPromotion, artifacts, withDownloadedUpdate, renderOzonResult, reportOutputDirectory, now, foreignJobs }) => ({
+export const createPromotionReportTool = ({ answer, authorization, authorize, ozonPromotion, artifacts, withDownloadedUpdate, renderOzonResult, reportOutputDirectory, now, foreignJobs, }) => ({
     needsBridge: true,
     // Parse boundary: the call's arguments, checked against the contract first.
     run: async (id, args = {}) => {
         const toolName = 'ozon_seller_promotion_report';
-        const dateFrom = args?.dateFrom;
-        const dateTo = args?.dateTo;
+        const { dateFrom, dateTo, triggerUrl } = isRecord(args) ? args : {};
         // One byte counter per call: every writer of this export shares it (spec §4.2).
         const jobBudget = { bytes: 0 };
         let authorizationLease;
@@ -49,7 +49,12 @@ export const createPromotionReportTool = ({ answer, authorization, authorize, oz
                         ? { details: normalized.details }
                         : {}),
                 }
-                : { code: 'ARTIFACT_REJECTED', message: 'The Ozon promotion report could not be completed safely.', stage: 'artifact', retryable: false };
+                : {
+                    code: 'ARTIFACT_REJECTED',
+                    message: 'The Ozon promotion report could not be completed safely.',
+                    stage: 'artifact',
+                    retryable: false,
+                };
             return {
                 ok: false,
                 status: 'failed',
@@ -71,7 +76,7 @@ export const createPromotionReportTool = ({ answer, authorization, authorize, oz
                 });
             }
             periodValidated = true;
-            if (typeof args.triggerUrl !== 'string' || !args.triggerUrl) {
+            if (typeof triggerUrl !== 'string' || !triggerUrl) {
                 throw new ToolExecutionError('OZON_AUTHORIZATION_REJECTED', 'The trusted browser-job hook did not provide Ozon authorization.', 'authorization', false);
             }
             artifacts.requireTarget();
@@ -91,15 +96,13 @@ export const createPromotionReportTool = ({ answer, authorization, authorize, oz
             if (readyExtensionOutdated)
                 throw readyExtensionOutdated;
             try {
-                authorizationLease = await authorization.authorize(args.triggerUrl);
+                authorizationLease = await authorization.authorize(triggerUrl);
             }
             catch (error) {
                 throw classifyOzonAuthorizationFailure(error, authorize.currentOzonStatus());
             }
             // A lease bound to no scope cannot run the operation: that is our defect.
-            if (!authorizationLease ||
-                typeof authorizationLease.scopeId !== 'string' ||
-                typeof authorizationLease.release !== 'function') {
+            if (!authorizationLease || typeof authorizationLease.scopeId !== 'string') {
                 throw new ToolExecutionError('OZON_AUTHORIZATION_REJECTED', `The extension returned an invalid Ozon promotion authorization. ${OZON_LEASE_DEFECT}`, 'authorization', false);
             }
             const lease = authorizationLease;
@@ -114,16 +117,15 @@ export const createPromotionReportTool = ({ answer, authorization, authorize, oz
                 foreignJobs,
             });
             // A completed job has its workbook.
-            reportArtifacts = [getOzonPromotionArtifactResource(result)];
-            terminalResult = renderOzonResult(result, `Ozon Seller promotion report complete: one XLSX workbook for ${dateFrom} through ${dateTo}.`, [getOzonPromotionArtifactResource(result)]);
+            const resource = getOzonPromotionArtifactResource(result);
+            reportArtifacts = resource ? [resource] : [];
+            terminalResult = renderOzonResult(result, `Ozon Seller promotion report complete: one XLSX workbook for ${dateFrom} through ${dateTo}.`, reportArtifacts);
         }
         catch (error) {
             terminalResult = textResult(failureResult(await withDownloadedUpdate(error, isOzonPackageCapabilityFailure(error))), true);
         }
         finally {
-            const currentLease = authorizationLease;
-            authorizationLease = undefined;
-            releaseAuthorizationInBackground(currentLease, 'after Ozon promotion report completion');
+            releaseAuthorizationInBackground(authorizationLease, 'after Ozon promotion report completion');
         }
         answer(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
     },

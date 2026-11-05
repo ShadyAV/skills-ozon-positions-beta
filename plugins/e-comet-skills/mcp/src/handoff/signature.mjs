@@ -1,9 +1,10 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { resolveProfileStateDir } from '../storage/files/state-paths.mjs';
+import { UUID_V4, isPositiveSafeInteger, isRecord } from '../shared/values.mjs';
 import { resolvePluginDataRoot } from '../storage/files/layout.mjs';
-import { UUID_V4, isRecord } from '../shared/values.mjs';
+import { resolveProfileStateDir } from '../storage/files/state-paths.mjs';
+import { safeFeedbackProperty } from '../transport/failures/evidence.mjs';
 const HOOK_SECRET_FILE = 'feedback-hook-secret';
 const HOOK_SECRET_BYTES = 32;
 const HOOK_SIGNATURE_CONTEXT = 'e-comet-feedback-hook-signature-v1';
@@ -19,28 +20,39 @@ const SECRET_RETRY_DELAY_MS = 25;
 const SECRET_RETRY_LIMIT = 20;
 const wait = (delayMs) => new Promise((resolveWait) => setTimeout(resolveWait, delayMs));
 const bindingMismatch = () => Object.assign(new Error('The trusted feedback handoff claim could not be verified.'), { feedbackReason: 'claim_binding_mismatch' });
-const secretUnavailable = (cause, code = 'ENOENT') => Object.assign(new Error('The trusted feedback hook secret is unavailable.', cause === undefined ? undefined : { cause }), { code: typeof cause?.code === 'string' ? cause.code : code });
+const secretUnavailable = (cause, code = 'ENOENT') => {
+    const causeCode = safeFeedbackProperty(cause, 'code');
+    return Object.assign(new Error('The trusted feedback hook secret is unavailable.', cause === undefined ? undefined : { cause }), {
+        code: typeof causeCode === 'string' ? causeCode : code,
+    });
+};
 // Prepare authenticates injected fields, not full report text, one-use or expiry. Captured bearer
 // replay requires reconsidering the documented same-user boundary, not an implicit nonce store.
 const validPrepareFields = (fields) => {
     const keys = Object.keys(fields);
     if (keys.length === 0)
         return true;
-    return keys.length === 1 && keys[0] === 'transcriptPath'
-        && typeof fields.transcriptPath === 'string' && fields.transcriptPath.length > 0
-        && Buffer.byteLength(fields.transcriptPath, 'utf8') <= MAX_TRANSCRIPT_PATH_BYTES;
+    return (keys.length === 1 &&
+        keys[0] === 'transcriptPath' &&
+        typeof fields.transcriptPath === 'string' &&
+        fields.transcriptPath.length > 0 &&
+        Buffer.byteLength(fields.transcriptPath, 'utf8') <= MAX_TRANSCRIPT_PATH_BYTES);
 };
 const validSubmitFields = (fields) => {
     const expected = ['artifactId', 'expectedSha256', 'expectedSize', 'expiresAt', 'objectKey', 'requiredHeaders', 'uploadUrl'];
-    return Object.keys(fields).sort().join('\0') === expected.join('\0')
-        && typeof fields.artifactId === 'string' && ARTIFACT_ID_PATTERN.test(fields.artifactId)
-        && typeof fields.uploadUrl === 'string' && fields.uploadUrl.length > 0
-        && typeof fields.objectKey === 'string' && fields.objectKey.length > 0
-        && isRecord(fields.requiredHeaders)
-        && Object.values(fields.requiredHeaders).every((value) => typeof value === 'string')
-        && Number.isSafeInteger(fields.expiresAt) && fields.expiresAt > 0
-        && Number.isSafeInteger(fields.expectedSize) && fields.expectedSize > 0
-        && typeof fields.expectedSha256 === 'string' && SHA256_PATTERN.test(fields.expectedSha256);
+    return (Object.keys(fields).sort().join('\0') === expected.join('\0') &&
+        typeof fields.artifactId === 'string' &&
+        ARTIFACT_ID_PATTERN.test(fields.artifactId) &&
+        typeof fields.uploadUrl === 'string' &&
+        fields.uploadUrl.length > 0 &&
+        typeof fields.objectKey === 'string' &&
+        fields.objectKey.length > 0 &&
+        isRecord(fields.requiredHeaders) &&
+        Object.values(fields.requiredHeaders).every((value) => typeof value === 'string') &&
+        isPositiveSafeInteger(fields.expiresAt) &&
+        isPositiveSafeInteger(fields.expectedSize) &&
+        typeof fields.expectedSha256 === 'string' &&
+        SHA256_PATTERN.test(fields.expectedSha256));
 };
 const SIGNABLE_FIELDS = {
     prepare_e_comet_feedback: validPrepareFields,
@@ -65,7 +77,9 @@ const canonical = (value) => {
     if (Array.isArray(value))
         return value.map(canonical);
     if (isRecord(value))
-        return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+        return Object.fromEntries(Object.keys(value)
+            .sort()
+            .map((key) => [key, canonical(value[key])]));
     return value;
 };
 const signedMessage = ({ tool, sessionHash, fields }) => {
@@ -125,7 +139,7 @@ const readHookSecret = async (path) => {
         return bytes.length === HOOK_SECRET_BYTES ? bytes : 'incomplete';
     }
     catch (error) {
-        if (error?.code === 'ENOENT')
+        if (safeFeedbackProperty(error, 'code') === 'ENOENT')
             return 'absent';
         throw secretUnavailable(error);
     }
@@ -170,7 +184,7 @@ export const loadHookSecret = async ({ env = process.env, create = false, retryD
                 await writeFile(path, randomBytes(HOOK_SECRET_BYTES), { flag: 'wx', mode: 0o600 });
             }
             catch (error) {
-                if (error?.code !== 'EEXIST') {
+                if (safeFeedbackProperty(error, 'code') !== 'EEXIST') {
                     // A partial file left by this failed write must not outlive it as a permanently
                     // wrong-sized secret; a complete one that appeared meanwhile is not ours.
                     await removeUnlessComplete(path);

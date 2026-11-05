@@ -6,57 +6,98 @@ export const isHostRuntimeVersion = (value) => typeof value === 'string' && /^[0
 export const isOsRelease = (value) => typeof value === 'string' && /^[0-9A-Za-z._+-]{1,64}$/.test(value);
 // What the native DeepSeek adapter passes about the local module it restarted: the closed class of the last failure
 // (runtime.mjs localFailureOf) and how many times it started the module again.
-export const HOST_LAST_FAILURES = Object.freeze(['spawn_failed', 'timeout', 'exited', 'protocol', 'unknown']);
+export const HOST_LAST_FAILURES = ['spawn_failed', 'timeout', 'exited', 'protocol', 'unknown'];
 export const hostRestartFacts = (env) => ({
-    ...(HOST_LAST_FAILURES.includes(env.ECOMET_HOST_LAST_FAILURE) ? { hostLastFailure: env.ECOMET_HOST_LAST_FAILURE } : {}),
+    ...(HOST_LAST_FAILURES.includes(env.ECOMET_HOST_LAST_FAILURE)
+        ? { hostLastFailure: env.ECOMET_HOST_LAST_FAILURE }
+        : {}),
     ...(/^\d{1,6}$/.test(env.ECOMET_HOST_RESTARTS ?? '') ? { hostRestarts: Number(env.ECOMET_HOST_RESTARTS) } : {}),
 });
 // The fact vocabularies below are the producers' own: the probes validate their output against these
 // schemas, the tool catalog publishes them, and the feedback projection admits exactly what they admit.
 // One definition means a family added on the producer side can never silently vanish from a report.
-const closed = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
+const closed = (properties, required = []) => ({
+    type: 'object',
+    properties,
+    required,
+    additionalProperties: false,
+});
 const list = (items, extra = {}) => ({ type: 'array', items, ...extra });
 const string = { type: 'string' };
 const boolean = { type: 'boolean' };
 const nonNegativeInteger = { type: 'integer', minimum: 0 };
 const enumeration = (values) => ({ type: 'string', enum: [...values] });
-export const HOOK_PERMISSIONS_VOCABULARY = Object.freeze({
-    events: Object.freeze(['preToolUse', 'postToolUse', 'postToolUseFailure', 'unknown']),
-    families: Object.freeze(['browser_authorization_restore', 'browser_authorization_capture', 'update_check', 'feedback_authorization_restore',
-        'feedback_authorization_capture', 'plugin_hook']),
-    trust: Object.freeze(['trusted', 'untrusted', 'modified', 'managed', 'unknown']),
-    trustCounters: Object.freeze(['trusted', 'untrusted', 'modified', 'managed']),
-    statuses: Object.freeze(['ready', 'disabled', 'review_required', 'missing', 'incomplete_inventory', 'unsupported']),
-    installationMatch: Object.freeze(['matched', 'not_verified']),
-    failureReasons: Object.freeze(['timeout', 'process_missing', 'permission_denied', 'process_closed', 'protocol_error', 'response_too_large']),
-    failurePhases: Object.freeze(['startup', 'initialize', 'request', 'response', 'transport']),
+export const HOOK_PERMISSIONS_VOCABULARY = {
+    events: ['preToolUse', 'postToolUse', 'postToolUseFailure', 'unknown'],
+    families: [
+        'browser_authorization_restore',
+        'browser_authorization_capture',
+        'update_check',
+        'feedback_authorization_restore',
+        'feedback_authorization_capture',
+        'plugin_hook',
+    ],
+    trust: ['trusted', 'untrusted', 'modified', 'managed', 'unknown'],
+    trustCounters: ['trusted', 'untrusted', 'modified', 'managed'],
+    statuses: ['ready', 'disabled', 'review_required', 'missing', 'incomplete_inventory', 'unsupported'],
+    installationMatch: ['matched', 'not_verified'],
+    failureReasons: ['timeout', 'process_missing', 'permission_denied', 'process_closed', 'protocol_error', 'response_too_large'],
+    failurePhases: ['startup', 'initialize', 'request', 'response', 'transport'],
     inspector: 'transient_config_reader',
-});
+};
 const hookPermissionsInventoryFactsSchema = closed({
-    host: { const: 'codex' }, context: { const: 'configuration_snapshot' },
-    configured: nonNegativeInteger, enabled: nonNegativeInteger,
-    trust: closed(Object.fromEntries(HOOK_PERMISSIONS_VOCABULARY.trustCounters.map((key) => [key, nonNegativeInteger])), [...HOOK_PERMISSIONS_VOCABULARY.trustCounters]),
+    host: { const: 'codex' },
+    context: { const: 'configuration_snapshot' },
+    configured: nonNegativeInteger,
+    enabled: nonNegativeInteger,
+    trust: closed(Object.fromEntries(HOOK_PERMISSIONS_VOCABULARY.trustCounters.map((key) => [key, nonNegativeInteger])), [
+        ...HOOK_PERMISSIONS_VOCABULARY.trustCounters,
+    ]),
     hooks: list(closed({
-        eventName: enumeration(HOOK_PERMISSIONS_VOCABULARY.events), family: enumeration(HOOK_PERMISSIONS_VOCABULARY.families),
-        enabled: boolean, trustStatus: enumeration(HOOK_PERMISSIONS_VOCABULARY.trust),
+        eventName: enumeration(HOOK_PERMISSIONS_VOCABULARY.events),
+        family: enumeration(HOOK_PERMISSIONS_VOCABULARY.families),
+        enabled: boolean,
+        trustStatus: enumeration(HOOK_PERMISSIONS_VOCABULARY.trust),
     }, ['eventName', 'family', 'enabled', 'trustStatus'])),
-    warnings: boolean, errors: boolean,
+    warnings: boolean,
+    errors: boolean,
     status: enumeration(HOOK_PERMISSIONS_VOCABULARY.statuses),
     inspector: { const: HOOK_PERMISSIONS_VOCABULARY.inspector },
     installationMatch: enumeration(HOOK_PERMISSIONS_VOCABULARY.installationMatch),
     currentApplicationMatch: { const: 'not_verified' },
     missing: list(string, { uniqueItems: true }),
-}, ['host', 'context', 'configured', 'enabled', 'trust', 'hooks', 'warnings', 'errors', 'status', 'inspector', 'installationMatch', 'currentApplicationMatch']);
+}, [
+    'host',
+    'context',
+    'configured',
+    'enabled',
+    'trust',
+    'hooks',
+    'warnings',
+    'errors',
+    'status',
+    'inspector',
+    'installationMatch',
+    'currentApplicationMatch',
+]);
 const hookPermissionsFailureFactsSchema = closed({
-    host: { const: 'codex' }, context: { const: 'configuration_probe' }, inspector: { const: HOOK_PERMISSIONS_VOCABULARY.inspector },
+    host: { const: 'codex' },
+    context: { const: 'configuration_probe' },
+    inspector: { const: HOOK_PERMISSIONS_VOCABULARY.inspector },
     status: { const: 'failed' },
-    failure: closed({ reason: enumeration(HOOK_PERMISSIONS_VOCABULARY.failureReasons), phase: enumeration(HOOK_PERMISSIONS_VOCABULARY.failurePhases) }, ['reason', 'phase']),
+    failure: closed({
+        reason: enumeration(HOOK_PERMISSIONS_VOCABULARY.failureReasons),
+        phase: enumeration(HOOK_PERMISSIONS_VOCABULARY.failurePhases),
+    }, ['reason', 'phase']),
 }, ['host', 'context', 'inspector', 'status', 'failure']);
-export const hookPermissionsFactsSchema = { type: 'object', oneOf: [hookPermissionsInventoryFactsSchema, hookPermissionsFailureFactsSchema] };
-export const EXTENSION_INSTALL_VOCABULARY = Object.freeze({
-    browsers: Object.freeze(['chrome', 'edge', 'brave', 'yandex', 'opera']),
-    profileSources: Object.freeze(['local_state', 'default_only']),
-    profileStates: Object.freeze(['enabled', 'disabled', 'unknown']),
+export const hookPermissionsFactsSchema = {
+    type: 'object',
+    oneOf: [hookPermissionsInventoryFactsSchema, hookPermissionsFailureFactsSchema],
+};
+export const EXTENSION_INSTALL_VOCABULARY = {
+    browsers: ['chrome', 'edge', 'brave', 'yandex', 'opera'],
+    profileSources: ['local_state', 'default_only'],
+    profileStates: ['enabled', 'disabled', 'unknown'],
     extensionId: /^[a-p]{32}$/,
     // The directory names Chromium gives a profile, and `other` for a directory it did not name that way: any other
     // name would be free text, and an unusual directory name can identify its owner, in a report.
@@ -67,9 +108,9 @@ export const EXTENSION_INSTALL_VOCABULARY = Object.freeze({
     maxDisableReasons: 31,
     maxDisableReason: 2 ** 30,
     // Generous for a person's browser profiles; the cap keeps the report projection bounded (accepted residual
-    // "Device projection caps are a measured margin" in docs/local-agent-architecture.md#accepted-residuals).
+    // "Device projection caps are a measured margin" in docs/architecture/residuals/feedback.md).
     maxProfiles: 32,
-});
+};
 const extensionVersion = { type: 'string', pattern: EXTENSION_INSTALL_VOCABULARY.version.source };
 const extensionProfileSchema = closed({
     profile: { type: 'string', pattern: EXTENSION_INSTALL_VOCABULARY.profile.source },
@@ -97,32 +138,45 @@ export const extensionInstallFactsSchema = closed({
 // the canonical time and a non-empty version are optional, so a looser extension build keeps its
 // activation, storage and port facts in a report instead of losing the whole observation.
 // Version 2 adds `tabs` (readiness: a port of that type answered its last ping) and `pendingUpdateVersion`.
-export const EXTENSION_SNAPSHOT_VOCABULARY = Object.freeze({
-    keys: Object.freeze(['protocolVersion', 'observedAt', 'extensionVersion', 'capabilities', 'activationIdentity', 'storageRead', 'ports',
-        'tabs', 'pendingUpdateVersion']),
-    activation: Object.freeze(['present', 'absent', 'unknown']),
-    storageRead: Object.freeze(['passed', 'failed', 'unknown']),
-    ports: Object.freeze(['wb', 'wbSeller', 'ozon']),
-});
+export const EXTENSION_SNAPSHOT_VOCABULARY = {
+    keys: [
+        'protocolVersion',
+        'observedAt',
+        'extensionVersion',
+        'capabilities',
+        'activationIdentity',
+        'storageRead',
+        'ports',
+        'tabs',
+        'pendingUpdateVersion',
+    ],
+    activation: ['present', 'absent', 'unknown'],
+    storageRead: ['passed', 'failed', 'unknown'],
+    ports: ['wb', 'wbSeller', 'ozon'],
+};
 const portSchema = { oneOf: [boolean, { const: 'unknown' }] };
 const tabReadinessSchema = closed({ ready: boolean, lastPingAgeMs: nonNegativeInteger }, ['ready']);
 export const extensionSnapshotFactsSchema = closed({
     protocolVersion: { type: 'integer', minimum: 1, maximum: 2 },
-    tabs: closed(Object.fromEntries(EXTENSION_SNAPSHOT_VOCABULARY.ports.map((key) => [key, tabReadinessSchema])), [...EXTENSION_SNAPSHOT_VOCABULARY.ports]),
+    tabs: closed(Object.fromEntries(EXTENSION_SNAPSHOT_VOCABULARY.ports.map((key) => [key, tabReadinessSchema])), [
+        ...EXTENSION_SNAPSHOT_VOCABULARY.ports,
+    ]),
     pendingUpdateVersion: { type: 'string', pattern: '^\\d{1,9}(\\.\\d{1,9}){0,3}$' },
     observedAt: { type: 'string', minLength: 24, maxLength: 24 },
     extensionVersion: { type: 'string', minLength: 1, maxLength: 128 },
     capabilities: list({ type: 'string', minLength: 1, maxLength: 128 }),
     activationIdentity: closed({ state: enumeration(EXTENSION_SNAPSHOT_VOCABULARY.activation) }, ['state']),
     storageRead: closed({ state: enumeration(EXTENSION_SNAPSHOT_VOCABULARY.storageRead) }, ['state']),
-    ports: closed(Object.fromEntries(EXTENSION_SNAPSHOT_VOCABULARY.ports.map((key) => [key, portSchema])), [...EXTENSION_SNAPSHOT_VOCABULARY.ports]),
+    ports: closed(Object.fromEntries(EXTENSION_SNAPSHOT_VOCABULARY.ports.map((key) => [key, portSchema])), [
+        ...EXTENSION_SNAPSHOT_VOCABULARY.ports,
+    ]),
 }, ['protocolVersion', 'capabilities', 'activationIdentity', 'storageRead', 'ports']);
 // The extension_log check (extension-log.mjs): how the reader fared, and Chrome's native-port close text reduced to a
 // class, so the text itself never reaches a result, a status or a report.
-export const EXTENSION_LOG_VOCABULARY = Object.freeze({
-    readerStates: Object.freeze(['read', 'no_log', 'no_profile', 'unreadable', 'format_unknown', 'truncated']),
-    closeClasses: Object.freeze(['host_not_found', 'host_forbidden', 'host_blocked', 'host_exited', 'start_failed', 'communication_error', 'other']),
-});
+export const EXTENSION_LOG_VOCABULARY = {
+    readerStates: ['read', 'no_log', 'no_profile', 'unreadable', 'format_unknown', 'truncated'],
+    closeClasses: ['host_not_found', 'host_forbidden', 'host_blocked', 'host_exited', 'start_failed', 'communication_error', 'other'],
+};
 // Published as it is in the local_bridge_status output schema, so every node carries its description.
 const described = (schema, description) => ({ ...schema, description });
 const secondsAgo = (what) => described(nonNegativeInteger, `Whole seconds before the observation since ${what}.`);

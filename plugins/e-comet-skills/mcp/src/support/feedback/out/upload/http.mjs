@@ -1,8 +1,9 @@
-import { request as httpsRequest } from 'node:https';
 import { validateHeaderValue } from 'node:http';
-import { recordFeedbackHttpStatus, withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
+import { request as httpsRequest } from 'node:https';
+import { isRecord } from '../../../../shared/values.mjs';
 import { FEEDBACK_MAX_BYTES } from '../../domain/constants/limits.const.mjs';
 import { FeedbackUploadError } from '../../domain/converters/errors.converter.mjs';
+import { recordFeedbackHttpStatus, withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
 const MAX_UPLOAD_URL_BYTES = 8 * 1024;
 const MAX_REQUIRED_HEADERS = 32;
 const MAX_HEADER_NAME_BYTES = 128;
@@ -21,7 +22,9 @@ const timeout = () => Object.assign(new Error('Feedback upload deadline elapsed.
 // Parse boundary: the grant's fields are checked here before any request exists.
 const assertGrant = ({ uploadUrl, requiredHeaders, expiresAt, bytes }, now, maxBytes) => {
     let target;
-    if (typeof uploadUrl !== 'string' || Buffer.byteLength(uploadUrl, 'utf8') === 0 || Buffer.byteLength(uploadUrl, 'utf8') > MAX_UPLOAD_URL_BYTES) {
+    if (typeof uploadUrl !== 'string' ||
+        Buffer.byteLength(uploadUrl, 'utf8') === 0 ||
+        Buffer.byteLength(uploadUrl, 'utf8') > MAX_UPLOAD_URL_BYTES) {
         throw grantInvalid();
     }
     try {
@@ -35,9 +38,9 @@ const assertGrant = ({ uploadUrl, requiredHeaders, expiresAt, bytes }, now, maxB
     if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > maxBytes)
         throw grantInvalid();
     // Signed grants use Unix seconds, matching the rest of the browser-job authorization protocol.
-    if (!Number.isSafeInteger(expiresAt) || expiresAt * 1000 <= now())
+    if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt * 1000 <= now())
         throw grantInvalid();
-    if (!requiredHeaders || typeof requiredHeaders !== 'object' || Array.isArray(requiredHeaders))
+    if (!isRecord(requiredHeaders))
         throw grantInvalid();
     const entries = Object.entries(requiredHeaders);
     if (entries.length > MAX_REQUIRED_HEADERS)
@@ -71,25 +74,30 @@ const assertGrant = ({ uploadUrl, requiredHeaders, expiresAt, bytes }, now, maxB
     }
     if (!seen.has('content-length'))
         headers['Content-Length'] = String(bytes.length);
-    return { target, headers };
+    return { target, headers, bytes };
 };
 /**
  * Sends one immutable feedback archive to one signed S3-compatible HTTPS URL.
  */
 // Parse boundary: the grant is checked by assertGrant before any request exists.
 export const putFeedbackArchive = async (grant, options = {}) => {
-    const { requestImpl = httpsRequest, now = Date.now, timeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS, maxBytes = FEEDBACK_MAX_BYTES, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout } = options;
-    if (typeof requestImpl !== 'function' || typeof now !== 'function' || typeof setTimeoutImpl !== 'function' || typeof clearTimeoutImpl !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_UPLOAD_TIMEOUT_MS || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > FEEDBACK_MAX_BYTES) {
+    const { requestImpl = httpsRequest, now = Date.now, timeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS, maxBytes = FEEDBACK_MAX_BYTES, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout, } = options;
+    if (!Number.isSafeInteger(timeoutMs) ||
+        timeoutMs < 1 ||
+        timeoutMs > MAX_UPLOAD_TIMEOUT_MS ||
+        !Number.isSafeInteger(maxBytes) ||
+        maxBytes < 1 ||
+        maxBytes > FEEDBACK_MAX_BYTES) {
         throw grantInvalid();
     }
     let validated;
     try {
-        validated = assertGrant(grant ?? {}, now, maxBytes);
+        validated = assertGrant(isRecord(grant) ? grant : {}, now, maxBytes);
     }
     catch (error) {
         throw withFeedbackOperation(error, 'grant_validation');
     }
-    const { target, headers } = validated;
+    const { target, headers, bytes } = validated;
     return new Promise((resolve, reject) => {
         let settled = false;
         let wallTimer;
@@ -110,7 +118,9 @@ export const putFeedbackArchive = async (grant, options = {}) => {
                 try {
                     request?.destroy();
                 }
-                catch { /* Request cleanup cannot alter the observed timeout. */ }
+                catch {
+                    /* Request cleanup cannot alter the observed timeout. */
+                }
             }, timeoutMs);
             request = requestImpl({
                 protocol: 'https:',
@@ -125,25 +135,28 @@ export const putFeedbackArchive = async (grant, options = {}) => {
                 response.once('aborted', () => undefined);
                 response.once('error', () => undefined);
                 response.resume?.();
-                if (!Number.isInteger(response.statusCode) || response.statusCode < 100 || response.statusCode > 599) {
+                const status = response.statusCode;
+                if (status === undefined || !Number.isInteger(status) || status < 100 || status > 599) {
                     finish(reject, uncertain());
                 }
-                else if ([200, 201, 204].includes(response.statusCode)) {
+                else if ([200, 201, 204].includes(status)) {
                     finish(resolve, { status: 'uploaded' });
                 }
                 else {
-                    finish(reject, rejected(response.statusCode));
+                    finish(reject, rejected(status));
                 }
             });
             request.once('error', (error) => finish(reject, uncertain(error)));
             request.setTimeout(timeoutMs, () => {
                 finish(reject, uncertain(timeout()));
                 try {
-                    request.destroy();
+                    request?.destroy();
                 }
-                catch { /* Request cleanup cannot alter the observed timeout. */ }
+                catch {
+                    /* Request cleanup cannot alter the observed timeout. */
+                }
             });
-            request.end(grant.bytes);
+            request.end(bytes);
         }
         catch (error) {
             finish(reject, uncertain(error));

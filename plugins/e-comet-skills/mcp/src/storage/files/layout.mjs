@@ -2,14 +2,13 @@ import { realpathSync, statSync } from 'node:fs';
 import { posix, resolve, win32 } from 'node:path';
 import { StorageUnavailableError } from '../../shared/storage-unavailable.mjs';
 import { resolveLocalStateDir } from './state-paths.mjs';
-// Mixed-release quota eviction is an accepted residual; keep these paths and direct overrides stable.
-// See docs/local-agent-architecture.md#accepted-residuals.
+// Keep these paths and direct overrides stable: earlier releases write the same roots (VERSIONING.md, "Files Of Earlier
+// Releases").
 const OUTPUT_SUBTREE = 'local-mcp-output-v2';
 const UNEXPANDED_BRACED_PATH = /\$\{[^}]+\}/;
 const UNEXPANDED_COMPONENT = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%)$/;
 const pathApi = (platform) => (platform === 'win32' ? win32 : posix);
-const unavailable = (reason) => Object.freeze({ state: 'unavailable', reason });
-// A target from an untyped caller may lack its fields; it then reads as plugin data that is invalid.
+const unavailable = (reason) => ({ state: 'unavailable', reason });
 export const requireStorageTarget = (target, store) => {
     if (target?.state === 'ready')
         return target.path;
@@ -24,7 +23,7 @@ const normalizedAbsolutePath = (value, platform) => {
     // Hosts and overrides provide literal paths. Bare variable markers must occupy
     // a whole component; '$' in a username and '%' in separate names are not expansion.
     const components = trimmed.split(platform === 'win32' ? /[\\/]/ : /\//);
-    if (components.some(component => UNEXPANDED_COMPONENT.test(component)))
+    if (components.some((component) => UNEXPANDED_COMPONENT.test(component)))
         return undefined;
     const api = pathApi(platform);
     if (!api.isAbsolute(trimmed))
@@ -39,7 +38,7 @@ export const resolvePluginDataRoot = (env = process.env, flow, platform = proces
     if (flow === 'browser-job' || flow === 'feedback') {
         const candidate = env?.CLAUDE_PLUGIN_DATA || env?.PLUGIN_DATA;
         return typeof candidate === 'string' && candidate.trim()
-            ? Object.freeze({ state: 'ready', path: resolve(candidate) })
+            ? { state: 'ready', path: resolve(candidate) }
             : unavailable('plugin_data_missing');
     }
     if (flow === 'update') {
@@ -48,7 +47,7 @@ export const resolvePluginDataRoot = (env = process.env, flow, platform = proces
             return unavailable('plugin_data_missing');
         try {
             const path = realpathSync(candidate);
-            return statSync(path).isDirectory() ? Object.freeze({ state: 'ready', path }) : unavailable('plugin_data_invalid');
+            return statSync(path).isDirectory() ? { state: 'ready', path } : unavailable('plugin_data_invalid');
         }
         catch {
             return unavailable('plugin_data_invalid');
@@ -56,31 +55,30 @@ export const resolvePluginDataRoot = (env = process.env, flow, platform = proces
     }
     // An empty declaration is invalid configuration, not an absent host variable:
     // silently falling back would relocate output the host explicitly tried to own.
-    const candidates = [env?.PLUGIN_DATA, env?.CLAUDE_PLUGIN_DATA]
-        .filter((value) => value !== undefined);
+    const candidates = [env?.PLUGIN_DATA, env?.CLAUDE_PLUGIN_DATA].filter((value) => value !== undefined);
     if (candidates.length === 0)
         return unavailable('plugin_data_missing');
     const normalized = candidates.map((value) => normalizedAbsolutePath(value, platform));
-    if (normalized.some((value) => value === undefined))
+    const paths = normalized.filter((value) => value !== undefined);
+    if (paths.length !== normalized.length)
         return unavailable('plugin_data_invalid');
-    if (new Set(normalized.map((value) => identity(value, platform))).size !== 1) {
+    const [first] = paths;
+    if (first === undefined || new Set(paths.map((value) => identity(value, platform))).size !== 1) {
         return unavailable('plugin_data_conflict');
     }
-    return Object.freeze({ state: 'ready', path: normalized[0] });
+    return { state: 'ready', path: first };
 };
 export const explicitOrPluginTarget = (explicitValue, pluginRoot, childName, platform = process.platform, backend = 'plugin_data') => {
     if (explicitValue !== undefined) {
         const path = normalizedAbsolutePath(explicitValue, platform);
-        return path === undefined
-            ? unavailable('override_invalid')
-            : Object.freeze({ state: 'ready', backend: 'override', path });
+        return path === undefined ? unavailable('override_invalid') : { state: 'ready', backend: 'override', path };
     }
     if (pluginRoot.state !== 'ready')
         return pluginRoot;
     const path = pathApi(platform).join(pluginRoot.path, OUTPUT_SUBTREE, childName);
-    return Object.freeze({ state: 'ready', backend, path });
+    return { state: 'ready', backend, path };
 };
-export const resolveStorageLayout = ({ env = process.env, platform = process.platform, home = undefined } = {}) => {
+export const resolveStorageLayout = ({ env = process.env, platform = process.platform, home = undefined, } = {}) => {
     let pluginRoot = resolvePluginDataRoot(env, 'mcp', platform);
     let backend = 'plugin_data';
     // Legacy hosts may provide plugin data only to hooks. Missing host metadata permits
@@ -94,21 +92,17 @@ export const resolveStorageLayout = ({ env = process.env, platform = process.pla
         catch {
             path = undefined;
         }
-        pluginRoot = path === undefined
-            ? unavailable('application_data_invalid')
-            : Object.freeze({ state: 'ready', path });
+        pluginRoot = path === undefined ? unavailable('application_data_invalid') : { state: 'ready', path };
     }
-    return Object.freeze({
+    return {
         results: explicitOrPluginTarget(env?.ECOMET_LOCAL_AGENT_RESULT_DIR, pluginRoot, 'results', platform, backend),
         marketplaceArtifacts: explicitOrPluginTarget(env?.ECOMET_LOCAL_AGENT_ARTIFACT_DIR, pluginRoot, 'marketplace-artifacts', platform, backend),
         feedbackArtifacts: explicitOrPluginTarget(env?.ECOMET_FEEDBACK_ARTIFACT_DIR, pluginRoot, 'feedback-artifacts', platform, backend),
-    });
+    };
 };
 export const storageStatus = (layout) => Object.fromEntries(Object.entries(layout).map(([name, target]) => [
     name,
-    target.state === 'ready'
-        ? Object.freeze({ state: target.state, backend: target.backend })
-        : Object.freeze({ state: target.state, reason: target.reason }),
+    target.state === 'ready' ? { state: target.state, backend: target.backend } : { state: target.state, reason: target.reason },
 ]));
 // The MCP root resolves the layout once at start and passes it here (refactor spec §7.5); a writer called without an
 // explicit target uses it. Without a root (an in-process test), it is resolved from the environment once, on first use.
@@ -116,4 +110,4 @@ let currentLayout;
 export const useStorageLayout = (layout) => {
     currentLayout = layout;
 };
-export const currentStorageLayout = () => currentLayout ??= resolveStorageLayout();
+export const currentStorageLayout = () => (currentLayout ??= resolveStorageLayout());

@@ -1,19 +1,19 @@
 import { homedir, userInfo } from 'node:os';
 import { posix, win32 } from 'node:path';
-export const resolveLocalStateDir = ({ platform = process.platform, env = process.env, home = homedir() } = {}) => {
+export const resolveLocalStateDir = ({ platform = process.platform, env = process.env, home = homedir(), } = {}) => {
     if (platform === 'win32') {
         return win32.join(env.LOCALAPPDATA || win32.join(home, 'AppData', 'Local'), 'e-comet', 'local-agent');
     }
     if (platform === 'darwin') {
         return posix.join(home, 'Library', 'Application Support', 'e-comet', 'local-agent');
     }
-    // Accepted residual "Linux agent hosts with different XDG variables": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Linux agent hosts with different XDG variables": docs/architecture/residuals/native-bridge.md.
     return posix.join(env.XDG_DATA_HOME || posix.join(home, '.local', 'share'), 'e-comet', 'local-agent');
 };
 // The home directory of the OS account, read from the account database rather than from HOME or USERPROFILE.
 // A host that launches a process with a remapped HOME (a sandbox, a test harness, a packaged app) must not be
 // able to give it a private profile, because the profile is where independent processes meet.
-export const resolveAccountHome = ({ userInfo: accountInfo = userInfo, homedir: environmentHome = homedir } = {}) => {
+export const resolveAccountHome = ({ userInfo: accountInfo = userInfo, homedir: environmentHome = homedir, } = {}) => {
     try {
         const accountHome = accountInfo().homedir;
         if (typeof accountHome === 'string' && accountHome)
@@ -32,7 +32,7 @@ export const resolveAccountHome = ({ userInfo: accountInfo = userInfo, homedir: 
 // so it stays with the rest of the local state there.
 // ECOMET_TEST_STATE_DIR is honoured only under NODE_ENV test or development: pointing a shared secret at an
 // attacker-chosen directory is a footgun in production, and a test that remaps HOME no longer moves this path.
-export const resolveProfileStateDir = ({ platform = process.platform, env = process.env, home = resolveAccountHome() } = {}) => {
+export const resolveProfileStateDir = ({ platform = process.platform, env = process.env, home = resolveAccountHome(), } = {}) => {
     const override = env.ECOMET_TEST_STATE_DIR;
     if ((env.NODE_ENV === 'test' || env.NODE_ENV === 'development') && typeof override === 'string' && override.trim()) {
         return override;

@@ -1,10 +1,11 @@
 import { REQUEST_TIMEOUT_GRACE_MS } from '../../../bridge/limits.mjs';
-import { ARTIFACT_MAX_FILE_BYTES } from '../../../storage/limits.mjs';
-import { validTimeout } from '../../../shared/timeouts.mjs';
-import { SELLER_OPERATION_STAGES } from '../../../transport/extension/wire.mjs';
 import { ToolExecutionError } from '../../../shared/coded-error.mjs';
+import { validTimeout } from '../../../shared/timeouts.mjs';
+import { fieldOf, isNonNegativeSafeInteger } from '../../../shared/values.mjs';
+import { ARTIFACT_MAX_FILE_BYTES } from '../../../storage/limits.mjs';
+import { SELLER_OPERATION_STAGES } from '../../../transport/extension/wire.mjs';
 import { MAX_SELLER_REVIEW_PHYSICAL_REPORTS } from '../../domain/constants/limits.const.mjs';
-import { isValidSellerOperation } from './validators.mjs';
+import { isValidSellerOperation, isValidSellerStreamEnd } from './validators.mjs';
 // The correlation type of a seller operation; its frames are routed and delivered by the request broker under it.
 export const SELLER_OPERATION = 'seller_operation';
 /**
@@ -12,7 +13,7 @@ export const SELLER_OPERATION = 'seller_operation';
  * checked against the lease's active scope, its authorization and the attested job type before it is sent; a download
  * streams its workbook through the caller's handlers, in order, and ends with the stream's end.
  */
-export const createSellerOperations = ({ correlation, maxPending = MAX_SELLER_REVIEW_PHYSICAL_REPORTS }) => {
+export const createSellerOperations = ({ correlation, maxPending = MAX_SELLER_REVIEW_PHYSICAL_REPORTS, }) => {
     const reportUnsettled = (kind, requestId, detail) => correlation.reportUnsettled(kind, requestId, detail);
     const settleSellerOperation = (requestId, pending, settle, value) => {
         if (correlation.stateOf(requestId) !== pending)
@@ -61,9 +62,9 @@ export const createSellerOperations = ({ correlation, maxPending = MAX_SELLER_RE
             return rejectInvalidSellerStream(requestId, pending);
         // `declaredSize` is optional on the wire, so an omitted value falls back to the per-file ceiling
         // instead of being reported as an out-of-order frame.
-        const { declaredSize, mimeType } = metadata;
-        if (declaredSize !== undefined &&
-            (!Number.isSafeInteger(declaredSize) || declaredSize < 0 || declaredSize > ARTIFACT_MAX_FILE_BYTES)) {
+        const declaredSize = fieldOf(metadata, 'declaredSize');
+        const mimeType = fieldOf(metadata, 'mimeType');
+        if (declaredSize !== undefined && (!isNonNegativeSafeInteger(declaredSize) || declaredSize > ARTIFACT_MAX_FILE_BYTES)) {
             return rejectInvalidSellerStream(requestId, pending, 'Seller stream declared an unusable artifact size.');
         }
         pending.state = 'streaming';
@@ -75,7 +76,7 @@ export const createSellerOperations = ({ correlation, maxPending = MAX_SELLER_RE
     const appendSellerStreamChunk = async (requestId, pending, index, data) => {
         if (pending.state === 'ending')
             return reportUnsettled('seller-stream-chunk', requestId, index);
-        if (pending.state !== 'streaming' || index !== pending.nextChunkIndex) {
+        if (pending.state !== 'streaming' || index !== pending.nextChunkIndex || typeof data !== 'string') {
             return rejectInvalidSellerStream(requestId, pending);
         }
         const decodedBytes = Buffer.byteLength(data, 'base64');
@@ -91,7 +92,8 @@ export const createSellerOperations = ({ correlation, maxPending = MAX_SELLER_RE
             return reportUnsettled('seller-stream-end', requestId);
         if (pending.state !== 'streaming')
             return rejectInvalidSellerStream(requestId, pending);
-        if (metadata.size !== pending.receivedStreamBytes ||
+        if (!isValidSellerStreamEnd(metadata) ||
+            metadata.size !== pending.receivedStreamBytes ||
             (pending.declaredStreamBytes !== null && metadata.size !== pending.declaredStreamBytes)) {
             return rejectInvalidSellerStream(requestId, pending);
         }
@@ -113,63 +115,66 @@ export const createSellerOperations = ({ correlation, maxPending = MAX_SELLER_RE
         if (type === 'stream_start')
             return startSellerStream(requestId, pending, payload);
         if (type === 'stream_chunk')
-            return appendSellerStreamChunk(requestId, pending, payload.index, payload.data);
+            return appendSellerStreamChunk(requestId, pending, fieldOf(payload, 'index'), fieldOf(payload, 'data'));
         return endSellerStream(requestId, pending, payload);
     };
     // One typed seller operation under `lease`: the lease's scope must be active, its authorization the scope's and its
     // attested job type seller_reviews (spec §7.4 lease binding); a download needs its three stream handlers.
     const run = (operation, streamHandlers, timeout, lease) => {
         const authorizationId = lease?.id;
-        const authorizationScopeId = lease?.scopeId;
-        const authorizationScope = correlation.scopes.get(authorizationScopeId);
-        if (!authorizationScope || !correlation.scopeIsActive(authorizationScopeId, authorizationScope)) {
+        // Scopes are kept by string ids, so any other value names no scope.
+        const authorizationScopeId = typeof lease?.scopeId === 'string' ? lease.scopeId : undefined;
+        const authorizationScope = authorizationScopeId === undefined ? undefined : correlation.scopes.get(authorizationScopeId);
+        if (authorizationScopeId === undefined ||
+            !authorizationScope ||
+            !correlation.scopeIsActive(authorizationScopeId, authorizationScope)) {
             return Promise.reject(correlation.scopeEnded(authorizationScopeId));
         }
-        // A lease with an active scope is defined.
-        if (authorizationScope.authorizationId !== authorizationId || lease.jobType !== 'seller_reviews' || !isValidSellerOperation(operation)) {
+        if (authorizationScope.authorizationId !== authorizationId ||
+            lease?.jobType !== 'seller_reviews' ||
+            !isValidSellerOperation(operation)) {
             return Promise.reject(new ToolExecutionError('SELLER_OPERATION_NOT_ALLOWED', 'Only a valid typed seller operation may be requested through its signed authorization scope.', 'arguments', false));
         }
         const requiresStreamHandlers = operation.stage === SELLER_OPERATION_STAGES.download;
-        if (requiresStreamHandlers &&
-            (!streamHandlers ||
-                typeof streamHandlers.onStart !== 'function' ||
-                typeof streamHandlers.onChunk !== 'function' ||
-                typeof streamHandlers.onEnd !== 'function')) {
+        if (requiresStreamHandlers && !streamHandlers) {
             return Promise.reject(new TypeError('Seller stream handlers must provide onStart, onChunk, and onEnd functions.'));
         }
-        const normalizedStreamHandlers = requiresStreamHandlers
+        const normalizedStreamHandlers = requiresStreamHandlers && streamHandlers
             ? streamHandlers
             : { onStart: () => undefined, onChunk: () => undefined, onEnd: () => undefined };
-        if (!validTimeout(timeout)) {
+        if (timeout === undefined || !validTimeout(timeout)) {
             return Promise.reject(new ToolExecutionError('SELLER_OPERATION_TIMEOUT_INVALID', 'Seller operation timeout is outside the allowed bounds.', 'arguments', false));
         }
         if (correlation.count(SELLER_OPERATION) >= maxPending) {
             return Promise.reject(new ToolExecutionError('SELLER_OPERATION_CAPACITY_EXCEEDED', 'Too many seller operations are pending.', 'local', true));
         }
+        // The operation's own record, which its frames find; the request's settlement joins it once the request opens.
+        const pending = {
+            resolve: () => undefined,
+            reject: () => undefined,
+            state: 'awaiting-result',
+            nextChunkIndex: 0,
+            receivedStreamBytes: 0,
+            declaredStreamBytes: null,
+            maxStreamBytes: ARTIFACT_MAX_FILE_BYTES,
+            streamHandlers: normalizedStreamHandlers,
+            handlerChain: Promise.resolve(),
+            authorizationScopeId,
+        };
         return correlation.open({
             type: SELLER_OPERATION,
             payload: { sellerOperation: operation, timeout, authorizationId, authorizationScopeId },
-            // A valid timeout is a number.
             timeoutMs: timeout + REQUEST_TIMEOUT_GRACE_MS,
             unrefTimer: false,
             timeoutError: () => new ToolExecutionError('SELLER_OPERATION_TIMEOUT', `The seller operation timed out after ${timeout} ms.`, 'extension', true),
-            authorization: { id: authorizationId, scopeId: authorizationScopeId },
-            createState: (control) => ({
-                resolve: control.resolve,
-                reject: control.reject,
-                state: 'awaiting-result',
-                nextChunkIndex: 0,
-                receivedStreamBytes: 0,
-                declaredStreamBytes: null,
-                maxStreamBytes: ARTIFACT_MAX_FILE_BYTES,
-                streamHandlers: normalizedStreamHandlers,
-                handlerChain: Promise.resolve(),
-                authorizationScopeId,
-            }),
-            onFrame: (frame, control) => sellerFrame(control.id, control.state, frame),
-            onScopeEnded: (error, _scope, control) => cancelSellerOperation(control.id, control.state, error),
-            onAbort: (errorOrMessage, control) => cancelSellerOperation(control.id, control.state, errorOrMessage instanceof Error ? errorOrMessage : new Error(errorOrMessage)),
-            onSendError: (error, control) => settleSellerOperation(control.id, control.state, (reason) => control.reject(reason), error),
+            authorization: { id: authorizationScope.authorizationId, scopeId: authorizationScopeId },
+            createState: (control) => Object.assign(pending, { resolve: control.resolve, reject: control.reject }),
+            onFrame: (frame, control) => sellerFrame(control.id, pending, frame),
+            onScopeEnded: (error, _scope, control) => cancelSellerOperation(control.id, pending, error),
+            onAbort: (errorOrMessage, control) => cancelSellerOperation(control.id, pending, errorOrMessage instanceof Error
+                ? errorOrMessage
+                : new Error(errorOrMessage === undefined ? undefined : String(errorOrMessage))),
+            onSendError: (error, control) => settleSellerOperation(control.id, pending, (reason) => control.reject(reason), error),
         }).result;
     };
     return { run };

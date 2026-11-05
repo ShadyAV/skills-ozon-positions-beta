@@ -1,13 +1,13 @@
 import { isCredentialName, redactFeedbackText } from '../converters/report.converter.mjs';
 // Installation checks worth carrying in a report, keyed by the doctor's check name. The doctor's own
 // runtime and storage checks duplicate what the status already holds and are left out.
-export const INSTALLATION_SLOTS = Object.freeze({
+export const INSTALLATION_SLOTS = {
     package_layout: 'packageLayout',
     package_metadata: 'packageMetadata',
     codex_manifest: 'codexManifest',
     mcp_configuration: 'mcpConfiguration',
     entrypoint: 'entrypoint',
-});
+};
 const CONNECTION_ROWS = 'native-connection';
 // One row as the archive stores it: every string passes the report redaction on its own, and a value of any type under
 // a credential name (an array of cookies, an object) is replaced whole. Per leaf, because the authorization and cookie
@@ -30,7 +30,8 @@ const archivedRow = (row) => JSON.stringify(redactLeaves(row));
  * not, cut to `maxBytes`. It keeps the newest rows in the order the extension stored them. Undefined when no row is left.
  */
 export const feedbackExtensionLog = (rows, { includeTranscript, maxBytes }) => {
-    const candidates = (Array.isArray(rows) ? rows : []).filter((row) => includeTranscript || row?.requestId === CONNECTION_ROWS)
+    const candidates = (Array.isArray(rows) ? rows : [])
+        .filter((row) => includeTranscript || row?.requestId === CONNECTION_ROWS)
         .map((row, index) => ({ index, text: archivedRow(row) }));
     const kept = [];
     let size = 2;

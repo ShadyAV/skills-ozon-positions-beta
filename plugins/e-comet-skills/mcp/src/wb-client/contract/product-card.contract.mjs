@@ -1,7 +1,7 @@
-import { array, boolean, integer, nonNegativeInteger, number, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
-import { buyerErrorProperties, buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, priceSchema, resultPathGuidance } from './live.mjs';
-import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
+import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { toolErrorSchema, withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
+import { array, boolean, integer, nonNegativeInteger, number, object, objectUnion, positiveInteger, string, } from '../../transport/mcp/schema.mjs';
+import { buyerErrorProperties, buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, priceSchema, resultPathGuidance, } from './live.mjs';
 const warehouseSchema = object({
     wh: positiveInteger,
     warehouse: string,
@@ -61,7 +61,10 @@ const productCardSuccessSchema = object({
     products: array(productCardSchema),
 }, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'total', 'succeeded', 'failed', 'products']);
 const productCardContract = 'Get live Wildberries product-card data by article ID. Use for Russian requests about остаток, остатки, сток, наличие, склады, размеры, цена, карточка товара, описание, характеристики, or склейка. ' +
-    authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance + rejectionAndHandoffGuidance +
+    authorizationWorkflow +
+    localBridgeFailureGuidance +
+    buyerOutcomeGuidance +
+    rejectionAndHandoffGuidance +
     'Authorize with job {type:"product_card",product_ids:[integer,...]}; use 1-1000 positive product IDs. Read products[]. For price use priceRub.product; priceRub.basic is the crossed-out/basic price. ' +
     'For stock use quantity.total, quantity.byWarehouse, and quantity.bySize. Warehouse names are already in warehouse; if absent, display wh <id>. Use colors for merged articles, options for characteristics, and description for description. ' +
     'Translate raw field names for the user and render booleans as yes/no. A product-level ok:false is a failed WB request, not proof that the product does not exist. Report partial item errors. ' +
@@ -77,5 +80,8 @@ export const contract = {
     inputSchema: liveInputSchema(),
     outputSchema: withRunningAnswer(withOperationDiagnostic(objectUnion(...liveAggregateSchemas(productCardSuccessSchema), toolErrorSchema))),
     annotations: liveToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'wb_product_card'], text: `${productCardContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'wb_product_card'],
+        text: `${productCardContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

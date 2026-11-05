@@ -5,7 +5,7 @@ import { extractBrowserJobToken } from '../../../handoff/call-result.mjs';
  * the bridge must have a broker, and without one this answers the cause; then the extension authorizes the token the
  * trigger URL carries.
  */
-export const createAuthorization = ({ ensureBroker, requestBrowserJobAuthorization }) => ({
+export const createAuthorization = ({ ensureBroker, requestBrowserJobAuthorization, }) => ({
     connect: async () => {
         const route = await ensureBroker();
         return route.ok ? undefined : bridgeCauseError(route);

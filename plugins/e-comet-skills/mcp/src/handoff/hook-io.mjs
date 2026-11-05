@@ -47,4 +47,7 @@ export const writeHookResult = (result) => {
     process.exitCode = result.exitCode;
 };
 // True when the module at `moduleUrl` is the script the host started.
-export const isHookEntry = (moduleUrl) => Boolean(process.argv[1]) && pathToFileURL(resolve(process.argv[1])).href === moduleUrl;
+export const isHookEntry = (moduleUrl) => {
+    const entry = process.argv[1];
+    return entry ? pathToFileURL(resolve(entry)).href === moduleUrl : false;
+};

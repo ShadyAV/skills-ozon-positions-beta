@@ -21,8 +21,8 @@ export const compareCalVer = (left, right) => {
     if (normalizedLeft === null || normalizedRight === null)
         return null;
     for (let index = 0; index < normalizedLeft.length; index += 1) {
-        const leftComponent = normalizedLeft[index];
-        const rightComponent = normalizedRight[index];
+        const leftComponent = normalizedLeft[index] ?? 0;
+        const rightComponent = normalizedRight[index] ?? 0;
         if (leftComponent < rightComponent)
             return -1;
         if (leftComponent > rightComponent)

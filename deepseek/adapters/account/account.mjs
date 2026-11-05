@@ -1,16 +1,17 @@
+import { auth } from '@modelcontextprotocol/sdk/client/auth.js';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { auth } from '@modelcontextprotocol/sdk/client/auth.js';
-import { FileOAuthProvider, CREDENTIAL_DIRECTORY, REMOTE_URL, OAUTH_ISSUER_ORIGIN, createTrustedFetch, startCallback } from './oauth.mjs';
-import { createRetry, RECONNECT_DELAYS_MS } from './retry.mjs';
-import { isLoginRequired } from './remote-client.mjs';
+import { isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 import { RETRY_POLICIES, retryTransientFileOperation } from '../../../plugins/e-comet-skills/mcp/src/storage/files/transient-retry.mjs';
+import { FileOAuthProvider, CREDENTIAL_DIRECTORY, REMOTE_URL, OAUTH_ISSUER_ORIGIN, createTrustedFetch, startCallback, } from './oauth.mjs';
+import { isLoginRequired } from './remote-client.mjs';
+import { createRetry, RECONNECT_DELAYS_MS } from './retry.mjs';
 const CONNECTION_FAILED = 'connection-failed';
 // A saved account whose connection dropped: the Host keeps retrying with the saved credentials.
 const RECONNECTING = 'reconnecting';
 const LOGIN_EXPIRED = 'login-expired';
 /** Host-only account owner. Its public views never contain credentials. */
-export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fetch, connectRemote, disconnectRemote, isRemoteConnected = () => true, timeoutMs = 300_000, retryDelaysMs = RECONNECT_DELAYS_MS } = {}) {
+export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fetch, connectRemote, disconnectRemote, isRemoteConnected = () => true, timeoutMs = 300_000, retryDelaysMs = RECONNECT_DELAYS_MS, }) {
     const saved = new FileOAuthProvider({ directory });
     let status = { state: 'checking' };
     let attempt;
@@ -58,7 +59,7 @@ export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fe
     async function initialize() {
         if (disposed || attempt)
             return getStatus();
-        const checking = status = { state: 'checking' };
+        const checking = (status = { state: 'checking' });
         // Startup runs independently of Host readiness. A manual action or disposal
         // owns its newer state even when the saved-account handshake finishes later.
         const ownsStatus = () => !disposed && !attempt && status === checking;
@@ -132,7 +133,9 @@ export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fe
         // A temporary credential read failure must leave automatic recovery scheduled.
         reconnect.reset();
         let resolveReady;
-        const ready = new Promise(resolve => { resolveReady = resolve; });
+        const ready = new Promise((resolve) => {
+            resolveReady = resolve;
+        });
         const current = { abort: new AbortController(), cancelled: false };
         const signal = AbortSignal.any([current.abort.signal, AbortSignal.timeout(timeoutMs)]);
         attempt = current;
@@ -167,17 +170,20 @@ export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fe
                 }
                 await mkdir(directory, { recursive: true, mode: 0o700 });
                 temporary = await mkdtemp(join(directory, 'login-'));
-                const provider = new FileOAuthProvider({ directory: temporary, onAuthorization(url) {
+                const provider = new FileOAuthProvider({
+                    directory: temporary,
+                    onAuthorization(url) {
                         if (url.origin !== OAUTH_ISSUER_ORIGIN)
                             throw new Error('Untrusted authorization URL.');
                         if (current.cancelled)
                             throw new Error('OAuth login cancelled.');
                         status = { state: 'connecting', authorizationUrl: url.href };
                         resolveReady({ state: 'connecting', authorizationUrl: url.href });
-                    } });
+                    },
+                });
                 current.callback = await startCallback(await provider.state(), { timeoutMs });
                 // The same deadline owns discovery and token exchange, not just the browser wait.
-                current.callback.code.catch(error => current.abort.abort(error));
+                current.callback.code.catch((error) => current.abort.abort(error));
                 if (current.cancelled) {
                     current.callback.close();
                     throw new Error('OAuth login cancelled.');
@@ -219,16 +225,26 @@ export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fe
                 status = { state: 'connected' };
             }
             catch (error) {
+                const failed = isRecord(error) ? error : {};
                 if (!current.cancelled)
-                    status = { state: 'error', errorCode: error.errorCode === 'authorization-declined' ? 'authorization-declined' : retrySavedConnection ? RECONNECTING : error.name === 'TimeoutError' || error.errorCode === 'connection-timeout' ? 'connection-timeout' : CONNECTION_FAILED };
+                    status = {
+                        state: 'error',
+                        errorCode: failed.errorCode === 'authorization-declined'
+                            ? 'authorization-declined'
+                            : retrySavedConnection
+                                ? RECONNECTING
+                                : failed.name === 'TimeoutError' || failed.errorCode === 'connection-timeout'
+                                    ? 'connection-timeout'
+                                    : CONNECTION_FAILED,
+                    };
             }
             finally {
                 current.callback?.close();
                 // This attempt owns only its login directory; other profiles may still be signing in.
-                // Permanent refusal is an accepted residual in docs/local-agent-architecture.md#accepted-residuals.
-                if (temporary)
-                    await retryTransientFileOperation(() => rm(temporary, { recursive: true, force: true }), RETRY_POLICIES.FEEDBACK)
-                        .catch(() => console.warn('[e-Comet] Login temporary cleanup failed.'));
+                // Permanent refusal is an accepted residual in docs/architecture/residuals/deepseek.md.
+                const owned = temporary;
+                if (owned)
+                    await retryTransientFileOperation(() => rm(owned, { recursive: true, force: true }), RETRY_POLICIES.FEEDBACK).catch(() => console.warn('[e-Comet] Login temporary cleanup failed.'));
                 resolveReady(getStatus());
                 if (attempt === current)
                     attempt = undefined;
@@ -250,13 +266,17 @@ export function createAccount({ directory = CREDENTIAL_DIRECTORY, fetchImpl = fe
         }
         catch (error) {
             // Respect the explicit unlink: retained credentials must not trigger recovery here.
-            // See "Native DeepSeek failed unlink" in docs/local-agent-architecture.md#accepted-residuals.
+            // See "Native DeepSeek failed unlink" in docs/architecture/residuals/deepseek.md.
             status = { state: 'error', errorCode: 'unlink-failed' };
             throw error;
         }
         status = { state: 'logged_out' };
         return getStatus();
     }
-    async function dispose() { disposed = true; reconnect.stop(); await cancelLogin(); }
+    async function dispose() {
+        disposed = true;
+        reconnect.stop();
+        await cancelLogin();
+    }
     return { initialize, getStatus, startLogin, waitForLogin: () => attempt?.done, cancelLogin, disconnect, dispose, remoteLost };
 }

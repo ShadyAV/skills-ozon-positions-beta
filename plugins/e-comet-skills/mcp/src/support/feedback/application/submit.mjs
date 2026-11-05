@@ -1,11 +1,11 @@
+import { UUID_V4, isPositiveSafeInteger, isRecord } from '../../../shared/values.mjs';
 import { FEEDBACK_UPLOAD_DESTINATIONS } from '../domain/constants/limits.const.mjs';
-import { assertUploadDestination, isPublishableObjectKey } from '../domain/policies/upload-destination.policy.mjs';
 import { feedbackSubmissionFailure } from '../domain/converters/errors.converter.mjs';
+import { assertUploadDestination, isPublishableObjectKey } from '../domain/policies/upload-destination.policy.mjs';
 import { feedbackDiagnostics, safeFeedbackProperty } from '../../../transport/failures/evidence.mjs';
-import { UUID_V4 } from '../../../shared/values.mjs';
 const ARTIFACT_ID = new RegExp(`^${UUID_V4}$`);
 const SHA256 = /^[a-f0-9]{64}$/;
-export const safeArtifactId = (artifactId) => (typeof artifactId === 'string' && ARTIFACT_ID.test(artifactId) ? artifactId : undefined);
+export const safeArtifactId = (artifactId) => typeof artifactId === 'string' && ARTIFACT_ID.test(artifactId) ? artifactId : undefined;
 export const submitError = (artifactId, status, code, message, stage, retryable, error = undefined, operation = 'submit') => ({
     ok: false,
     status,
@@ -28,9 +28,14 @@ const uploadFailure = (artifactId, code, error = undefined, operation = 'upload'
  */
 // Parse boundary: the call's arguments, already checked against the tool's input schema; the grant is checked below.
 const submit = async (input = {}, dependencies = {}, adapters, signed) => {
-    const { loadArtifact = adapters.loadArtifact, retireArtifact = adapters.retireArtifact, upload = adapters.upload, now = Date.now, destinations = FEEDBACK_UPLOAD_DESTINATIONS } = dependencies;
+    const { loadArtifact = adapters.loadArtifact, retireArtifact = adapters.retireArtifact, upload = adapters.upload, now = Date.now, destinations = FEEDBACK_UPLOAD_DESTINATIONS, } = dependencies;
     const artifactId = safeArtifactId(input.artifactId);
-    if (typeof loadArtifact !== 'function' || typeof retireArtifact !== 'function' || typeof upload !== 'function' || typeof now !== 'function' || !Array.isArray(destinations)) {
+    // A test seam may pass anything as destinations; checking an unknown view keeps their declared type below.
+    if (typeof loadArtifact !== 'function' ||
+        typeof retireArtifact !== 'function' ||
+        typeof upload !== 'function' ||
+        typeof now !== 'function' ||
+        !Array.isArray(destinations)) {
         throw new TypeError('Feedback submission dependencies are invalid.');
     }
     // A grant the model copied (Cowork) has no signature, so only e-Comet's own storage may receive it: accepted residual
@@ -43,29 +48,33 @@ const submit = async (input = {}, dependencies = {}, adapters, signed) => {
         // storage.
         let target;
         try {
-            target = assertUploadDestination(input.uploadUrl, destinations, input.requiredHeaders ?? {});
+            // The input schema admits only an object of header strings there.
+            target = assertUploadDestination(input.uploadUrl, destinations, isRecord(input.requiredHeaders) ? input.requiredHeaders : {});
         }
         catch (error) {
             return submitError(artifactId, 'failed', 'UPLOAD_DESTINATION_REFUSED', 'The feedback upload destination is not an e-Comet storage location.', 'grant', false, error, 'grant_validation');
         }
         // The object the URL writes is the report's identifier, so a slip in the copied objectKey cannot misname it.
-        const { pathPrefix } = destinations.find(({ hostname, pathPrefix: prefix }) => target.hostname === hostname && target.pathname.startsWith(prefix));
-        try {
-            unsignedReportId = decodeURIComponent(target.pathname.slice(pathPrefix.length));
+        // The destination check above accepted the URL, so one destination matches it.
+        const destination = destinations.find(({ hostname, pathPrefix }) => target.hostname === hostname && target.pathname.startsWith(pathPrefix));
+        if (destination) {
+            try {
+                unsignedReportId = decodeURIComponent(target.pathname.slice(destination.pathPrefix.length));
+            }
+            catch {
+                /* a garbled escape, refused below */
+            }
         }
-        catch { /* a garbled escape, refused below */ }
     }
     if (artifactId === undefined ||
         typeof input.uploadUrl !== 'string' ||
-        !input.requiredHeaders ||
-        typeof input.requiredHeaders !== 'object' ||
-        Array.isArray(input.requiredHeaders) ||
+        !isRecord(input.requiredHeaders) ||
         typeof input.objectKey !== 'string' ||
         (!signed && (typeof unsignedReportId !== 'string' || !isPublishableObjectKey(unsignedReportId))) ||
+        typeof expiresAt !== 'number' ||
         !Number.isSafeInteger(expiresAt) ||
         expiresAt * 1000 <= now() ||
-        !Number.isSafeInteger(input.expectedSize) ||
-        input.expectedSize <= 0 ||
+        !isPositiveSafeInteger(input.expectedSize) ||
         typeof input.expectedSha256 !== 'string' ||
         !SHA256.test(input.expectedSha256)) {
         return uploadFailure(artifactId, 'UPLOAD_GRANT_INVALID');
@@ -73,7 +82,10 @@ const submit = async (input = {}, dependencies = {}, adapters, signed) => {
     let artifact;
     try {
         artifact = await loadArtifact({ artifactId, expectedSize: input.expectedSize, expectedSha256: input.expectedSha256 });
-        if (!artifact || !Buffer.isBuffer(artifact.bytes) || artifact.bytes.length !== input.expectedSize || artifact.transcriptIncluded !== true && artifact.transcriptIncluded !== false) {
+        if (!artifact ||
+            !Buffer.isBuffer(artifact.bytes) ||
+            artifact.bytes.length !== input.expectedSize ||
+            (artifact.transcriptIncluded !== true && artifact.transcriptIncluded !== false)) {
             throw new Error('invalid artifact');
         }
     }
@@ -95,7 +107,13 @@ const submit = async (input = {}, dependencies = {}, adapters, signed) => {
     await retireArtifact({ artifactId }).catch(() => undefined);
     // The object key the accepted upload wrote is the one identifier both the seller and support can name.
     // It is published only here, after acceptance: an unaccepted grant names an object that does not exist.
-    return { ok: true, status: 'uploaded', artifactId, transcriptIncluded: artifact.transcriptIncluded, reportId: signed ? input.objectKey : unsignedReportId };
+    return {
+        ok: true,
+        status: 'uploaded',
+        artifactId,
+        transcriptIncluded: artifact.transcriptIncluded,
+        reportId: signed ? input.objectKey : unsignedReportId,
+    };
 };
 // Parse boundary: the call's arguments, already checked against the tool's input schema.
 export const submitFeedback = async (input = {}, dependencies = {}, adapters, signed) => {
@@ -107,12 +125,20 @@ export const submitFeedback = async (input = {}, dependencies = {}, adapters, si
     }
 };
 // The submission's closed outcome: the kind follows the result's code.
-const SUBMIT_KINDS = Object.freeze({
-    FEEDBACK_HOOK_HANDOFF_UNAVAILABLE: 'handoff_unavailable', UPLOAD_GRANT_INVALID: 'grant_invalid', UPLOAD_DESTINATION_REFUSED: 'destination_refused',
-    ARTIFACT_UNAVAILABLE: 'artifact_unavailable', UPLOAD_REJECTED: 'upload_rejected', UPLOAD_UNCERTAIN: 'upload_uncertain',
-});
-// Parse boundary: a result, ours or a test seam's, read by its closed code.
-export const submitOutcome = (result) => ({
-    kind: result.ok ? 'uploaded' : Object.hasOwn(SUBMIT_KINDS, result.error?.code) ? SUBMIT_KINDS[result.error.code] : 'submission_failed',
-    result,
-});
+const SUBMIT_KINDS = {
+    FEEDBACK_HOOK_HANDOFF_UNAVAILABLE: 'handoff_unavailable',
+    UPLOAD_GRANT_INVALID: 'grant_invalid',
+    UPLOAD_DESTINATION_REFUSED: 'destination_refused',
+    ARTIFACT_UNAVAILABLE: 'artifact_unavailable',
+    UPLOAD_REJECTED: 'upload_rejected',
+    UPLOAD_UNCERTAIN: 'upload_uncertain',
+};
+// Parse boundary: a result, ours or a test seam's, read by its closed code; the code is read as the property key it was.
+export const submitOutcome = (result) => {
+    const error = result.ok ? undefined : result.error;
+    const code = String(isRecord(error) ? error.code : undefined);
+    return {
+        kind: result.ok ? 'uploaded' : ((Object.hasOwn(SUBMIT_KINDS, code) ? SUBMIT_KINDS[code] : undefined) ?? 'submission_failed'),
+        result,
+    };
+};

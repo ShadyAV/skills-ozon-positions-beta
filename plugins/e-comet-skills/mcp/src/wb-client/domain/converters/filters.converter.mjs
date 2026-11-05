@@ -1,7 +1,7 @@
+import { fieldOf, isRecord, isUnknownArray } from '../../../shared/values.mjs';
 import { MAX_FILTER_KEY_LENGTH, MAX_FILTER_KEYS_PER_REQUEST } from '../constants/limits.const.mjs';
-import { isSuccessfulWbResponse } from '../policies/response.policy.mjs';
 import { numberOrUndefined } from './products.converter.mjs';
-import { isRecord } from '../../../shared/values.mjs';
+import { isSuccessfulWbResponse, wbData } from '../policies/response.policy.mjs';
 // WB search filters (resultset=filters): body {metadata, data: {filters, total}}. Only card characteristics (f<digits>)
 // and categories (xsubject) are returned to the agent; the raw responses stay in the result file.
 const CHARACTERISTIC_KEY = /^f\d+$/;
@@ -13,36 +13,48 @@ const FULL_LIST_KEY = new RegExp(`^ff[0-9a-z]{1,${MAX_FILTER_KEY_LENGTH - 2}}$`)
  */
 // Parse boundary: a WB filters answer, read field by field.
 export const readFiltersResponse = (response) => {
-    const body = response?.data?.body;
+    const body = wbData(response, 'body');
     if (!isSuccessfulWbResponse(response) || !isRecord(body) || !isRecord(body.metadata))
         return { state: 'failed' };
     if (!Object.hasOwn(body.metadata, 'search_result'))
         return { state: 'decoy' };
-    if (!isRecord(body.data) || !Array.isArray(body.data.filters))
+    const data = body.data;
+    if (!isRecord(data) || !isUnknownArray(data.filters))
         return { state: 'failed' };
-    return { state: 'genuine', filters: body.data.filters.filter(isRecord), total: numberOrUndefined(body.data.total) };
+    return { state: 'genuine', filters: data.filters.filter(isRecord), total: numberOrUndefined(data.total) };
 };
 const filterKind = (key) => (CHARACTERISTIC_KEY.test(key) ? 'characteristic' : key === 'xsubject' ? 'category' : undefined);
-const valueNames = (filter) => Array.isArray(filter.items) ? filter.items.flatMap((item) => (typeof item?.name === 'string' && item.name ? [item.name] : [])) : [];
+const valueNames = (filter) => isUnknownArray(filter.items)
+    ? filter.items.flatMap((item) => {
+        const name = fieldOf(item, 'name');
+        return typeof name === 'string' && name ? [name] : [];
+    })
+    : [];
 export const keptFilters = (filters) => filters.flatMap((filter) => {
-    const kind = typeof filter.key === 'string' ? filterKind(filter.key) : undefined;
+    const key = filter.key;
+    if (typeof key !== 'string')
+        return [];
+    const kind = filterKind(key);
     if (!kind)
         return [];
-    return [{
+    return [
+        {
             kind,
-            name: typeof filter.name === 'string' && filter.name ? filter.name : filter.key,
-            key: filter.key,
+            name: typeof filter.name === 'string' && filter.name ? filter.name : key,
+            key,
             isTop: filter.isTop === true,
             fullKey: typeof filter.fullKey === 'string' ? filter.fullKey : undefined,
             values: valueNames(filter),
-        }];
+        },
+    ];
 });
 /**
  * The distinct fullKey values of the kept filters WB truncated, as one full-list request may name them. The extension refuses
  * a repeated key as an unsigned URL, which would stop the whole job.
  */
-export const fullListKeys = (kept) => [...new Set(kept.filter((filter) => filter.isTop && FULL_LIST_KEY.test(filter.fullKey ?? '')).map((filter) => filter.fullKey))]
-    .slice(0, MAX_FILTER_KEYS_PER_REQUEST);
+export const fullListKeys = (kept) => [
+    ...new Set(kept.flatMap(({ isTop, fullKey }) => (isTop && fullKey !== undefined && FULL_LIST_KEY.test(fullKey) ? [fullKey] : []))),
+].slice(0, MAX_FILTER_KEYS_PER_REQUEST);
 /**
  * The kept filters with each truncated list replaced by its full list. `fullFilters` is the full-list response's filters, or
  * undefined when that request was not made or failed; a truncated filter it does not expand keeps its first values and

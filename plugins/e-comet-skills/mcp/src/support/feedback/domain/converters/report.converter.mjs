@@ -1,8 +1,8 @@
+import { isRecord } from '../../../../shared/values.mjs';
 import { FEEDBACK_KINDS } from '../constants/limits.const.mjs';
 import { FeedbackPreparationError } from './errors.converter.mjs';
 import { selectFeedbackDeviceSnapshot } from './snapshot.converter.mjs';
-import { isFeedbackCallTimestamp, isFeedbackToolName, isFeedbackToolOutcome } from './tool-outcome.converter.mjs';
-import { isRecord } from '../../../../shared/values.mjs';
+import { isFeedbackCallTimestamp, isFeedbackToolName, isFeedbackToolOutcome, } from './tool-outcome.converter.mjs';
 const FEEDBACK_KIND_SET = new Set(FEEDBACK_KINDS);
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 // How the device prepared the archive: signed by a trusted hook, or unsigned where no hook can change the call (Cowork).
@@ -46,13 +46,13 @@ const redactAuthorizationHeaders = (value) => value.replace(/\b(proxy-authorizat
 export const redactFeedbackText = (value) => {
     if (typeof value !== 'string')
         throw new TypeError('Feedback text must be a string');
-    return redactAuthorizationHeaders(redactCookieValues(redactJsonCredentialValues(value)))
+    return (redactAuthorizationHeaders(redactCookieValues(redactJsonCredentialValues(value)))
         .replace(/\bbearer\s+[^\s;,]+/gi, 'Bearer [REDACTED]')
         // The already-redacted alternative comes first so a second pass cannot match ]-terminated
         // placeholder text as a fresh secret and append another bracket. This protects API-key
         // placeholders; wire fitting measures the next redaction pass without assuming global idempotence.
         .replace(/\b(?:x-)?api[_-]?key\s*([:=])\s*(?:\[REDACTED\]|[^\s;,&}\]]+)/gi, (_match, delimiter) => `api_key${delimiter}[REDACTED]`)
-        .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]');
+        .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]'));
 };
 export const selectFeedbackDiagnostics = selectFeedbackDeviceSnapshot;
 // Parse boundary: one tool-call record of the report input, checked here.
@@ -65,7 +65,11 @@ const normalizeToolCall = (entry) => {
         throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
     if (call.outcome !== undefined && !isFeedbackToolOutcome(call.outcome))
         throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
-    return { name: redactFeedbackText(normalizeText(call.name)), at: call.at, outcome: call.outcome };
+    return {
+        name: redactFeedbackText(normalizeText(call.name)),
+        ...(isFeedbackCallTimestamp(call.at) ? { at: call.at } : {}),
+        ...(isFeedbackToolOutcome(call.outcome) ? { outcome: call.outcome } : {}),
+    };
 };
 const normalizeToolCalls = (toolCalls) => {
     if (toolCalls === undefined)
@@ -78,8 +82,21 @@ const normalizeToolCalls = (toolCalls) => {
 // hide exactly the failures this list exists to show. `is_error` is the host's own flag on the result.
 // The rendered outcome stays within 256 bytes: the fields go in this order and one that no longer fits is
 // left out whole, so the cloud archive reserve for a hundred lines still holds.
-const OUTCOME_FIELDS = ['status', 'isError', 'code', 'stage', 'cause', 'reason', 'bridgeCode', 'refusalCode', 'systemCode', 'marketplaceErrorCode',
-    'stopReason', 'itemCode', 'itemStage'];
+const OUTCOME_FIELDS = [
+    'status',
+    'isError',
+    'code',
+    'stage',
+    'cause',
+    'reason',
+    'bridgeCode',
+    'refusalCode',
+    'systemCode',
+    'marketplaceErrorCode',
+    'stopReason',
+    'itemCode',
+    'itemStage',
+];
 const MAX_OUTCOME_BYTES = 256;
 // Parse boundary: a checked outcome, rendered field by field.
 const renderOutcome = (outcome) => {
@@ -106,30 +123,42 @@ const renderToolCalls = (toolCalls, toolCallsTruncated) => {
         ...(omitted > 0 ? [`Only the newest ${FEEDBACK_TOOL_CALLS_MAX} tool calls are listed; ${omitted} earlier calls are omitted.`] : []),
         ...(toolCalls.length === 0
             ? ['No tool calls were available.']
-            : toolCalls.slice(omitted).map(({ name, at, outcome }, index) => `${index + 1}. ${at ? `${at} ` : ''}${name}${renderOutcome(outcome)}`)),
+            : toolCalls
+                .slice(omitted)
+                .map(({ name, at, outcome }, index) => `${index + 1}. ${at ? `${at} ` : ''}${name}${renderOutcome(outcome)}`)),
     ];
+};
+// Parse boundary: the projected device snapshot, read field by field. The projection builds every block as an
+// object, so a block that is not one is absent.
+const clientOf = (selectedDiagnostics) => {
+    const diagnostics = isRecord(selectedDiagnostics.diagnostics) ? selectedDiagnostics.diagnostics : undefined;
+    const client = isRecord(diagnostics?.client) ? diagnostics.client : undefined;
+    return { diagnostics, client, facts: isRecord(client?.facts) ? client.facts : undefined };
 };
 // The client name, version and host runtime version are host-authored text entering the archive: they
 // pass the same redaction as every authored string, before the diagnostics block and the host line alike.
-// Parse boundary: the projected device snapshot, read field by field.
 const redactClientFacts = (selectedDiagnostics) => {
-    const facts = selectedDiagnostics.diagnostics?.client?.facts;
+    const { diagnostics, client: projected, facts } = clientOf(selectedDiagnostics);
     if (!facts)
         return selectedDiagnostics;
-    const client = { ...selectedDiagnostics.diagnostics.client, facts: { ...facts,
+    const client = {
+        ...projected,
+        facts: {
+            ...facts,
             ...(facts.name === undefined ? {} : { name: redactFeedbackText(facts.name) }),
             ...(facts.version === undefined ? {} : { version: redactFeedbackText(facts.version) }),
-            ...(facts.hostRuntimeVersion === undefined ? {} : { hostRuntimeVersion: redactFeedbackText(facts.hostRuntimeVersion) }) } };
-    return { ...selectedDiagnostics, diagnostics: { ...selectedDiagnostics.diagnostics, client } };
+            ...(facts.hostRuntimeVersion === undefined ? {} : { hostRuntimeVersion: redactFeedbackText(facts.hostRuntimeVersion) }),
+        },
+    };
+    return { ...selectedDiagnostics, diagnostics: { ...diagnostics, client } };
 };
-// Parse boundary: the projected device snapshot, read field by field.
 const renderClient = (selectedDiagnostics) => {
-    const facts = selectedDiagnostics.diagnostics?.client?.facts;
+    const { facts } = clientOf(selectedDiagnostics);
     if (!facts?.name)
         return 'client: unknown';
     return `client: ${facts.name}${facts.version ? ` ${facts.version}` : ''}${facts.hostRuntimeVersion ? ` (host runtime ${facts.hostRuntimeVersion})` : ''}`;
 };
-export const renderFeedbackReport = ({ kind, summary, details, diagnostics, includeTranscript, route = 'native', toolCalls, toolCallsTruncated } = {}) => {
+export const renderFeedbackReport = ({ kind, summary, details, diagnostics, includeTranscript, route = 'native', toolCalls, toolCallsTruncated, } = {}) => {
     // WHY: report validation owns this safe category before transcript or artifact I/O can begin.
     if (!FEEDBACK_KIND_SET.has(kind))
         throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');

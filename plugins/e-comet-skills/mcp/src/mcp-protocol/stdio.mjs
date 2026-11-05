@@ -1,3 +1,4 @@
+import { isRecord } from '../shared/values.mjs';
 import { MAX_MCP_MESSAGE_BYTES } from '../transport/mcp/limits.mjs';
 export const attachStdioTransport = ({ input = process.stdin, handleMessage, sendError, onClose = () => undefined, maxMessageBytes = MAX_MCP_MESSAGE_BYTES, }) => {
     let buffer = '';
@@ -33,9 +34,9 @@ export const attachStdioTransport = ({ input = process.stdin, handleMessage, sen
                 continue;
             try {
                 const message = JSON.parse(line);
-                void Promise.resolve(handleMessage(message)).catch(() => {
+                Promise.resolve(handleMessage(message)).catch(() => {
                     try {
-                        sendError(message?.id ?? null, -32603, 'Internal error');
+                        sendError(isRecord(message) ? (message.id ?? null) : null, -32603, 'Internal error');
                     }
                     catch {
                         // The host may have already closed STDIO; there is no remaining response channel.

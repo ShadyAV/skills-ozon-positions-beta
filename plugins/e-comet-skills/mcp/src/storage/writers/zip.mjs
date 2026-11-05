@@ -8,12 +8,12 @@ const FIXED_DOS_TIME = 0;
 const FIXED_DOS_DATE = 0x0021;
 const REGULAR_FILE_ATTRIBUTES = 0x81a40000;
 const CRC_CHUNK_BYTES = 64 * 1024;
-const DEFLATE_OPTIONS = Object.freeze({
+const DEFLATE_OPTIONS = {
     level: 6,
     windowBits: 15,
     memLevel: 8,
     strategy: zlibConstants.Z_DEFAULT_STRATEGY,
-});
+};
 const CRC32_TABLE = new Uint32Array(256);
 for (let index = 0; index < CRC32_TABLE.length; index += 1) {
     let value = index;
@@ -27,7 +27,7 @@ const crc32 = async (bytes) => {
     for (let offset = 0; offset < bytes.length; offset += CRC_CHUNK_BYTES) {
         const end = Math.min(bytes.length, offset + CRC_CHUNK_BYTES);
         for (let index = offset; index < end; index += 1) {
-            value = CRC32_TABLE[(value ^ bytes[index]) & 0xff] ^ (value >>> 8);
+            value = (CRC32_TABLE[(value ^ (bytes[index] ?? 0)) & 0xff] ?? 0) ^ (value >>> 8);
         }
         // WHY: a maximum-sized transcript must not monopolize the MCP transport loop while its CRC is computed.
         if (end < bytes.length)
@@ -44,10 +44,10 @@ const deflateRawAsync = (bytes) => new Promise((resolve, reject) => {
     });
 });
 // Narrow read-only seams keep the two independent event-loop guarantees directly testable.
-export const zipInternals = Object.freeze({
+export const zipInternals = {
     crc32,
     deflateRaw: deflateRawAsync,
-});
+};
 // The local and central headers of one entry; an archive adds them and one end record to its entry bytes.
 export const zipEntryFramingBytes = (nameBytes) => 30 + nameBytes.length + 46 + nameBytes.length;
 export const ZIP_END_RECORD_BYTES = 22;
@@ -91,10 +91,7 @@ const writeCentralHeader = ({ nameBytes, bytes, compressedBytes, method, crc, lo
 export const writeZip = async (entries) => {
     const preparedEntries = [];
     for (const entry of entries) {
-        const [deflated, crc] = await Promise.all([
-            zipInternals.deflateRaw(entry.bytes),
-            zipInternals.crc32(entry.bytes),
-        ]);
+        const [deflated, crc] = await Promise.all([zipInternals.deflateRaw(entry.bytes), zipInternals.crc32(entry.bytes)]);
         // WHY: storing an expanding entry makes source bytes plus framing a hard archive bound,
         // so fitting complete transcript lines never need to be discarded for compression overhead.
         const store = deflated.length > entry.bytes.length;

@@ -1,23 +1,25 @@
 import { resourceLinkResult } from '../mcp-protocol/results/serialize.mjs';
+import { validateAuthorizedJobLimits as validateOzonJobLimits } from '../ozon-seller/application/job-limits.mjs';
 import { createAuthorize } from '../ozon-seller/in/mcp/authorize.mjs';
 import { createPackageTool } from '../ozon-seller/in/mcp/package.tool.mjs';
 import { createPromotionReportTool } from '../ozon-seller/in/mcp/promotion-report.tool.mjs';
 import { createSearchPositionsTool } from '../ozon-seller/in/mcp/search-positions.tool.mjs';
 import { createArtifacts } from '../ozon-seller/out/artifacts/xlsx.mjs';
 import { createAuthorization } from '../ozon-seller/out/extension/authorization.mjs';
-import { validateAuthorizedJobLimits as validateOzonJobLimits } from '../ozon-seller/application/job-limits.mjs';
-import { BUYER_JOB_TYPES } from '../wb-client/domain/constants/descriptors.const.mjs';
+import { isRecord } from '../shared/values.mjs';
 import { validateAuthorizedJobLimits as validateBuyerJobLimits } from '../wb-client/application/job-limits.mjs';
+import { BUYER_JOB_TYPES } from '../wb-client/domain/constants/descriptors.const.mjs';
 import { validateAuthorizedJobLimits as validateSellerJobLimits } from '../wb-seller/application/job-limits.mjs';
 // The buyer, filters and seller descriptor checks an Ozon job reads for a foreign signed job (ozon-seller's foreign-jobs
 // port): each context checks its own job types.
 export const foreignJobs = {
     validate: (authorization) => {
-        if (BUYER_JOB_TYPES.has(authorization?.jobType)) {
+        const jobType = isRecord(authorization) ? authorization.jobType : undefined;
+        if (BUYER_JOB_TYPES.has(jobType)) {
             validateBuyerJobLimits(authorization);
             return true;
         }
-        if (authorization?.jobType === 'seller_reviews') {
+        if (jobType === 'seller_reviews') {
             validateSellerJobLimits(authorization);
             return true;
         }
@@ -40,14 +42,28 @@ export const ozonSellerTools = (registry, { getBridgeStatus, ensureBroker, reque
         ...(artifactStorageTarget === undefined ? {} : { storageTarget: artifactStorageTarget }),
         ...(createOzonArtifactWriter === undefined ? {} : { createArtifactWriter: createOzonArtifactWriter }),
     });
-    const shared = { authorize, artifacts, withDownloadedUpdate: registry.withDownloadedUpdate, renderOzonResult, reportOutputDirectory, now, foreignJobs };
+    const shared = {
+        authorize,
+        artifacts,
+        withDownloadedUpdate: registry.withDownloadedUpdate,
+        renderOzonResult,
+        reportOutputDirectory,
+        now,
+        foreignJobs,
+    };
     return [
-        ['ozon_seller_promotion_report', createPromotionReportTool({ ...shared, answer: registry.answer('ozon_seller_promotion_report'),
-                authorization, ozonPromotion })],
-        ['ozon_seller_promotion_reports', createPackageTool({ ...shared, family: 'promotion', answer: registry.answer('ozon_seller_promotion_reports'),
-                ozonPackage })],
-        ['ozon_seller_analytics_report', createPackageTool({ ...shared, family: 'analytics', answer: registry.answer('ozon_seller_analytics_report'),
-                ozonPackage })],
+        [
+            'ozon_seller_promotion_report',
+            createPromotionReportTool({ ...shared, answer: registry.answer('ozon_seller_promotion_report'), authorization, ozonPromotion }),
+        ],
+        [
+            'ozon_seller_promotion_reports',
+            createPackageTool({ ...shared, family: 'promotion', answer: registry.answer('ozon_seller_promotion_reports'), ozonPackage }),
+        ],
+        [
+            'ozon_seller_analytics_report',
+            createPackageTool({ ...shared, family: 'analytics', answer: registry.answer('ozon_seller_analytics_report'), ozonPackage }),
+        ],
         ['ozon_search_positions', createSearchPositionsTool({ ...shared, answer: registry.answer('ozon_search_positions'), ozonPackage })],
     ];
 };

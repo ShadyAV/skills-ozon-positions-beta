@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, chmod, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ARTIFACT_MAX_CHUNK_BYTES, ARTIFACT_MAX_FILE_BYTES, ARTIFACT_MAX_JOB_BYTES, ARTIFACT_RETENTION_MS } from '../limits.mjs';
-import { sweepExpired } from '../files/retention.mjs';
+import { UUID_V4, isNonNegativeSafeInteger } from '../../shared/values.mjs';
 import { currentStorageLayout, requireStorageTarget } from '../files/layout.mjs';
+import { sweepExpired } from '../files/retention.mjs';
+import { ARTIFACT_MAX_CHUNK_BYTES, ARTIFACT_MAX_FILE_BYTES, ARTIFACT_MAX_JOB_BYTES, ARTIFACT_RETENTION_MS } from '../limits.mjs';
 import { assertXlsxPackage } from './xlsx.mjs';
-import { UUID_V4 } from '../../shared/values.mjs';
 // The one XLSX grammar of this root, today's and yesterday's: `<uuid>.xlsx` on Windows,
 // `<uuid>-<safe-name>` elsewhere (the safe name always ends in `.xlsx`), and that name plus `.part`
 // while it is being written. Only these two spellings are ours: a `.part` of some other program in a
@@ -26,7 +26,6 @@ export class ArtifactStoreError extends Error {
 // A rejected workbook write keeps a closed class (spec 7.4): `disk` with the filesystem code, a `limit`, an `integrity`
 // mismatch, or a stream in the wrong `format`. The text stays local; only the class and code leave this process.
 const rejected = (artifactClass, message) => Object.assign(new Error(message), { artifactClass });
-const isPositiveSafeInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const isSweptArtifactName = (name, entry) => !entry.isDirectory() && (ARTIFACT_PARTIAL_PATTERN.test(name) || ARTIFACT_FILE_PATTERN.test(name));
 const sweepArtifacts = (directory, { retentionMs, now }) => sweepExpired({ directory, ownName: isSweptArtifactName, retentionMs, now });
 const ensurePrivateDirectory = async (directory) => {
@@ -42,7 +41,10 @@ const clock = (now) => (typeof now === 'function' ? now : () => now);
 const safeArtifactName = (fileName) => {
     if (typeof fileName !== 'string' || fileName.length === 0)
         throw new Error('Artifact file name is required');
-    const sanitized = basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^\.+/, '').slice(0, 180);
+    const sanitized = basename(fileName)
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .replace(/^\.+/, '')
+        .slice(0, 180);
     const baseName = sanitized || 'artifact';
     return baseName.toLowerCase().endsWith('.xlsx') ? baseName : `${baseName}.xlsx`;
 };
@@ -60,16 +62,6 @@ const decodeCanonicalBase64 = (base64Data, maxChunkBytes) => {
         throw rejected('format', 'Artifact chunk must use canonical base64');
     return bytes;
 };
-const validateLimits = ({ maxChunkBytes, maxFileBytes, maxJobBytes, retentionMs }) => {
-    if (![maxChunkBytes, maxFileBytes, maxJobBytes, retentionMs].every(isPositiveSafeInteger)) {
-        throw new Error('Artifact limits must be positive safe integers');
-    }
-};
-const validateJobBudget = (jobBudget) => {
-    if (typeof jobBudget !== 'object' || jobBudget === null || !Number.isSafeInteger(jobBudget.bytes) || jobBudget.bytes < 0) {
-        throw new TypeError('Artifact job budget must be an object with a non-negative bytes counter');
-    }
-};
 /**
  * Sweeps exactly one root: the current artifacts root by default, or any directory the caller names.
  */
@@ -79,14 +71,10 @@ export const createArtifactWriter = async (options = {}) => {
     // One counter per call, created by the caller and shared by every writer of that call (spec
     // §4.2). A writer without one bounds only itself. Nothing outlives the call.
     jobBudget = { bytes: 0 }, retentionMs = ARTIFACT_RETENTION_MS, validateXlsx = false, signal, now = Date.now, } = options;
-    const artifactDir = configuredArtifactDir ?? requireStorageTarget(options.storageTarget ?? currentStorageLayout().marketplaceArtifacts, 'marketplaceArtifacts');
+    const artifactDir = configuredArtifactDir ??
+        requireStorageTarget(options.storageTarget ?? currentStorageLayout().marketplaceArtifacts, 'marketplaceArtifacts');
     if (typeof mimeType !== 'string' || mimeType.length === 0)
         throw new Error('Artifact MIME type is required');
-    validateLimits({ maxChunkBytes, maxFileBytes, maxJobBytes, retentionMs });
-    validateJobBudget(jobBudget);
-    if (signal !== undefined && (typeof signal !== 'object' || typeof signal.addEventListener !== 'function' || typeof signal.aborted !== 'boolean')) {
-        throw new TypeError('Artifact writer signal must be an AbortSignal');
-    }
     const nowMs = clock(now);
     let aborted = false;
     const abortReason = () => (signal?.reason instanceof Error ? signal.reason : new Error('Artifact writer is aborted'));
@@ -150,9 +138,11 @@ export const createArtifactWriter = async (options = {}) => {
         return writeChain;
     };
     if (signal) {
-        signal.addEventListener('abort', () => { void requestAbort().catch(() => undefined); }, { once: true });
+        signal.addEventListener('abort', () => {
+            requestAbort().catch(() => undefined);
+        }, { once: true });
         if (signal.aborted)
-            void requestAbort().catch(() => undefined);
+            requestAbort().catch(() => undefined);
     }
     return {
         appendChunk(index, base64Data) {
@@ -192,7 +182,7 @@ export const createArtifactWriter = async (options = {}) => {
             const publication = writeChain.then(async () => {
                 try {
                     assertWritable();
-                    if (!Number.isSafeInteger(size) || size < 0 || size !== byteCount)
+                    if (!isNonNegativeSafeInteger(size) || size !== byteCount)
                         throw rejected('integrity', 'Artifact declared size does not match written bytes');
                     if (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256))
                         throw rejected('integrity', 'Artifact SHA-256 must be a lowercase hexadecimal digest');
@@ -224,8 +214,8 @@ export const createArtifactWriter = async (options = {}) => {
                     completed = true;
                     // Housekeeping after the response, never part of it: sweep errors stay in stderr.
                     // Expired files can occupy space before this publication-driven sweep; that capacity
-                    // boundary is accepted in docs/local-agent-architecture.md#accepted-residuals.
-                    void sweepArtifacts(artifactDir, { retentionMs, now: nowMs() });
+                    // boundary is accepted in docs/architecture/residuals/storage.md.
+                    sweepArtifacts(artifactDir, { retentionMs, now: nowMs() });
                     return { name, path: deliveredPath, uri: pathToFileURL(deliveredPath).href, mimeType, size: byteCount, sha256 };
                 }
                 catch (error) {

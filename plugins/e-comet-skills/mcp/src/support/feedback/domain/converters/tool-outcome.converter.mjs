@@ -18,33 +18,32 @@ export const isFeedbackToolOutcome = (value) => {
     const keys = Object.keys(value);
     if (keys.length === 0 || keys.some((key) => !OUTCOME_KEYS.has(key)))
         return false;
-    return (value.ok === undefined || typeof value.ok === 'boolean')
-        && Object.entries(OUTCOME_GRAMMARS).every(([key, grammar]) => value[key] === undefined || (typeof value[key] === 'string' && grammar.test(value[key])))
-        && (value.marketplaceErrorCode === undefined || int32(value.marketplaceErrorCode) !== undefined)
-        && (value.isError === undefined || value.isError === true);
+    return ((value.ok === undefined || typeof value.ok === 'boolean') &&
+        Object.entries(OUTCOME_GRAMMARS).every(([key, grammar]) => value[key] === undefined || (typeof value[key] === 'string' && grammar.test(value[key]))) &&
+        (value.marketplaceErrorCode === undefined || int32(value.marketplaceErrorCode) !== undefined) &&
+        (value.isError === undefined || value.isError === true));
 };
-const FEEDBACK_TOOL_SUFFIXES = new Set([
-    'prepare_e_comet_feedback',
-    'report_issue',
-    'submit_e_comet_feedback',
-]);
+const FEEDBACK_TOOL_SUFFIXES = new Set(['prepare_e_comet_feedback', 'report_issue', 'submit_e_comet_feedback']);
 // Bounded parse of one result text: a marketplace result can be large, and one absurd tool output must
 // not stall the single-threaded server while it looks for five small fields. Beyond this, only the
 // host's own error flag is kept.
 export const OUTCOME_TEXT_MAX_LENGTH = 1_048_576;
 // functions.exec wraps the tool's own output behind a timing header; the tool output follows this marker.
 const EXEC_OUTPUT_MARKER = /\r?\nOutput:\r?\n/;
-const toolSuffix = (name) => name.split('__').at(-1);
+const toolSuffix = (name) => name.split('__').at(-1) ?? '';
 const isFeedbackTool = (name) => FEEDBACK_TOOL_SUFFIXES.has(toolSuffix(name));
 export const acceptedToolName = (value) => isFeedbackToolName(value) && !isFeedbackTool(value);
-export const callRecord = (name, timestamp) => ({ name, ...(isFeedbackCallTimestamp(timestamp) ? { at: timestamp } : {}) });
+export const callRecord = (name, timestamp) => ({
+    name,
+    ...(isFeedbackCallTimestamp(timestamp) ? { at: timestamp } : {}),
+});
 // Every text a result carries, in order: a plain string, or the text blocks of a content array.
 const resultTexts = (content) => {
     if (typeof content === 'string')
         return [content];
     if (!Array.isArray(content))
         return [];
-    return content.filter((item) => isObject(item) && typeof item.text === 'string').map((item) => item.text);
+    return content.flatMap((item) => (isObject(item) && typeof item.text === 'string' ? [item.text] : []));
 };
 // Parse boundary: one result text, whose object the projection reads field by field.
 const parseObject = (text) => {
@@ -83,11 +82,12 @@ const unwrapEnvelope = (value) => {
  */
 export const toolOutcomeProjector = ({ local, remote }) => {
     const REMOTE_TOOL_NAME = new RegExp(`^mcp__(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|e-comet|plugin_e-comet-skills_e-comet|(?:claude_ai_)?https_mcp_e-comet_io_mcp)__(?:${remote.join('|')})$`);
-    const isECometTool = (name) => typeof name === 'string'
-        && (local.has(toolSuffix(name)) || REMOTE_TOOL_NAME.test(name)
+    const isECometTool = (name) => typeof name === 'string' &&
+        (local.has(toolSuffix(name)) ||
+            REMOTE_TOOL_NAME.test(name) ||
             // The extractor still excludes feedback calls. The native bridge also uses
             // this closed projection to keep a failed authorization's transport private.
-            || name === 'mcp__e-comet__report_issue');
+            name === 'mcp__e-comet__report_issue');
     return (content, isError = false, toolName = undefined) => {
         const ours = isECometTool(toolName);
         const outcome = {};

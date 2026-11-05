@@ -1,16 +1,15 @@
-import { FEEDBACK_EXTENSION_LOG_MAX_BYTES, FEEDBACK_MAX_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH } from '../domain/constants/limits.const.mjs';
 import { collectFeedbackExtensionLog } from './evidence.mjs';
-import { serializeFeedbackMetadata } from '../domain/converters/metadata.converter.mjs';
-import { foldFeedbackLineEndings, redactFeedbackText, renderFeedbackReport } from '../domain/converters/report.converter.mjs';
-import { completeJsonlTail, transcriptUnavailable, truncatedTranscripts } from '../domain/policies/transcript-tail.policy.mjs';
+import { FEEDBACK_EXTENSION_LOG_MAX_BYTES, FEEDBACK_MAX_BYTES, FEEDBACK_MAX_SUMMARY_LENGTH, } from '../domain/constants/limits.const.mjs';
 import { FeedbackPreparationError } from '../domain/converters/errors.converter.mjs';
-import { safeFeedbackProperty, withFeedbackOperation } from '../../../transport/failures/evidence.mjs';
+import { serializeFeedbackMetadata } from '../domain/converters/metadata.converter.mjs';
+import { foldFeedbackLineEndings, redactFeedbackText, renderFeedbackReport, } from '../domain/converters/report.converter.mjs';
+import { completeJsonlTail, transcriptUnavailable, truncatedTranscripts, } from '../domain/policies/transcript-tail.policy.mjs';
 import { diagnosticCheck } from '../../../transport/diagnostics/vocabulary.mjs';
+import { safeFeedbackProperty, withFeedbackOperation } from '../../../transport/failures/evidence.mjs';
 const safeSummary = (summary) => {
-    // String.prototype.toWellFormed is ES2024; Node 22 has it, the target library does not declare it.
     const text = redactFeedbackText(foldFeedbackLineEndings(summary)).toWellFormed();
     let end = Math.min(text.length, FEEDBACK_MAX_SUMMARY_LENGTH);
-    if (end < text.length && /[\ud800-\udbff]/u.test(text[end - 1]))
+    if (end < text.length && /[\ud800-\udbff]/u.test(text[end - 1] ?? ''))
         end -= 1;
     return text.slice(0, end);
 };
@@ -22,16 +21,18 @@ const safeSummary = (summary) => {
  * root passes as `adapters`.
  */
 // Parse boundary: the call's arguments, already checked against the tool's input schema.
-export const prepareFeedback = async (input = {}, dependencies = {}, adapters, route) => {
-    const { getBridgeStatus, registerArtifact = adapters.registerArtifact, readTranscript = adapters.readTranscript, createZip = adapters.createZip, now = Date.now, platform = process.platform, arch = process.arch, version = undefined, maxBytes = FEEDBACK_MAX_BYTES, readExtensionLogRows = undefined, } = dependencies;
-    if (typeof getBridgeStatus !== 'function' || typeof registerArtifact !== 'function' || typeof readTranscript !== 'function' || typeof createZip !== 'function' || typeof now !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+export const prepareFeedback = async (input = {}, dependencies, adapters, route) => {
+    const { getBridgeStatus, registerArtifact = adapters.registerArtifact, readTranscript = adapters.readTranscript, createZip = adapters.createZip, now = Date.now, platform = process.platform, arch = process.arch, version, maxBytes = FEEDBACK_MAX_BYTES, readExtensionLogRows = undefined, } = dependencies;
+    if (getBridgeStatus === undefined)
         throw new TypeError('Feedback preparation dependencies are invalid');
-    }
     const { kind, summary, details, includeTranscript, transcriptPath } = input;
     // The extension's own log for extension-log.json, read alongside the status within the evidence deadline. Raw log
     // text never enters the result below.
-    const extensionLogRead = collectFeedbackExtensionLog({ readExtensionLogRows, includeTranscript: includeTranscript === true, maxBytes: FEEDBACK_EXTENSION_LOG_MAX_BYTES })
-        .then((log) => log && { bytes: Buffer.from(log.text, 'utf8'), rows: log.rows, trimmed: log.trimmed });
+    const extensionLogRead = collectFeedbackExtensionLog({
+        readExtensionLogRows,
+        includeTranscript: includeTranscript === true,
+        maxBytes: FEEDBACK_EXTENSION_LOG_MAX_BYTES,
+    }).then((log) => log && { bytes: Buffer.from(log.text, 'utf8'), rows: log.rows, trimmed: log.trimmed });
     let diagnostics = {};
     try {
         diagnostics = await getBridgeStatus();
@@ -39,9 +40,16 @@ export const prepareFeedback = async (input = {}, dependencies = {}, adapters, r
     catch (error) {
         // Diagnostics are optional; reporting must remain possible during bridge failures.
         const code = safeFeedbackProperty(error, 'code');
-        diagnostics = { bridgeStatusCollection: diagnosticCheck({ check: 'bridge_status_collection', state: 'failed',
-                observedAt: new Date(now()).toISOString(), source: 'feedback_preparation', executionPlane: 'device',
-                cause: ['EACCES', 'EPERM'].includes(code) ? 'permission_denied' : 'unknown' }) };
+        diagnostics = {
+            bridgeStatusCollection: diagnosticCheck({
+                check: 'bridge_status_collection',
+                state: 'failed',
+                observedAt: new Date(now()).toISOString(),
+                source: 'feedback_preparation',
+                executionPlane: 'device',
+                cause: ['EACCES', 'EPERM'].includes(code) ? 'permission_denied' : 'unknown',
+            }),
+        };
     }
     const atOperation = (operation, action) => {
         try {
@@ -54,6 +62,9 @@ export const prepareFeedback = async (input = {}, dependencies = {}, adapters, r
     // Validate the authored report before transcript I/O. Reuse this report if no calls
     // are available, including hosts that cannot provide a path when history is declined.
     let reportBytes = atOperation('report_render', () => renderFeedbackReport({ kind, summary, details, diagnostics, includeTranscript, route, toolCalls: [] }));
+    // The render above already refused a kind or summary that is not a string.
+    if (typeof kind !== 'string' || typeof summary !== 'string')
+        throw new FeedbackPreparationError('FEEDBACK_INPUT_INVALID');
     let snapshot;
     if (transcriptPath !== undefined || includeTranscript === true) {
         let toolCalls;
@@ -85,9 +96,15 @@ export const prepareFeedback = async (input = {}, dependencies = {}, adapters, r
     let extensionLog = await extensionLogRead;
     let extensionLogTrimmed = extensionLog?.trimmed === true;
     const serializeMetadata = (transcriptSizeBytes) => atOperation('metadata_encode', () => serializeFeedbackMetadata({
-        createdAt, version, platform, arch, transcriptIncluded, transcriptSizeBytes,
+        createdAt,
+        version,
+        platform,
+        arch,
+        transcriptIncluded,
+        transcriptSizeBytes,
         ...(transcriptTruncated ? { transcriptTruncated: true } : {}),
-        extensionLogRows: extensionLog?.rows ?? 0, extensionLogTrimmed,
+        extensionLogRows: extensionLog?.rows ?? 0,
+        extensionLogTrimmed,
     }));
     // extension-log.json follows report.md and metadata.json: a report that leaves it no room drops it whole, and the
     // history tail takes what it leaves.
@@ -103,6 +120,8 @@ export const prepareFeedback = async (input = {}, dependencies = {}, adapters, r
         const provisionalMetadataBytes = serializeMetadata(0);
         const remaining = Math.max(0, maxBytes - framingBytes - reportBytes.length - provisionalMetadataBytes.length - extensionLogLength);
         // The history was read above whenever it is included.
+        if (snapshot === undefined)
+            throw transcriptUnavailable();
         transcriptBytes = completeJsonlTail(snapshot, remaining);
         transcriptTruncated = truncatedTranscripts.has(transcriptBytes);
     }
@@ -123,7 +142,12 @@ export const prepareFeedback = async (input = {}, dependencies = {}, adapters, r
     const metadataBytes = fitSourceBudget();
     let archiveBytes;
     try {
-        archiveBytes = await createZip({ reportBytes, metadataBytes, ...(transcriptBytes === undefined ? {} : { transcriptBytes }), ...(extensionLog ? { extensionLogBytes: extensionLog.bytes } : {}) }, { maxBytes });
+        archiveBytes = await createZip({
+            reportBytes,
+            metadataBytes,
+            ...(transcriptBytes === undefined ? {} : { transcriptBytes }),
+            ...(extensionLog ? { extensionLogBytes: extensionLog.bytes } : {}),
+        }, { maxBytes });
     }
     catch (error) {
         throw new FeedbackPreparationError('FEEDBACK_ARCHIVE_FAILED', error);
@@ -156,13 +180,21 @@ export const prepareFeedback = async (input = {}, dependencies = {}, adapters, r
     });
 };
 // The preparation's closed outcome: the failure kind follows the error's code.
-const PREPARATION_KINDS = Object.freeze({
-    FEEDBACK_INPUT_INVALID: 'input_invalid', FEEDBACK_HOOK_HANDOFF_UNAVAILABLE: 'handoff_unavailable', FEEDBACK_CLAIM_INVALID: 'claim_invalid',
-    TRANSCRIPT_UNAVAILABLE: 'transcript_unavailable', FEEDBACK_ARCHIVE_FAILED: 'archive_failed', FEEDBACK_STORAGE_UNAVAILABLE: 'storage_unavailable',
-});
+const PREPARATION_KINDS = {
+    FEEDBACK_INPUT_INVALID: 'input_invalid',
+    FEEDBACK_HOOK_HANDOFF_UNAVAILABLE: 'handoff_unavailable',
+    FEEDBACK_CLAIM_INVALID: 'claim_invalid',
+    TRANSCRIPT_UNAVAILABLE: 'transcript_unavailable',
+    FEEDBACK_ARCHIVE_FAILED: 'archive_failed',
+    FEEDBACK_STORAGE_UNAVAILABLE: 'storage_unavailable',
+};
 export const preparationOutcome = (error) => {
     const code = safeFeedbackProperty(error, 'code');
-    return { kind: typeof code === 'string' && Object.hasOwn(PREPARATION_KINDS, code) ? PREPARATION_KINDS[code] : 'preparation_failed', error };
+    return {
+        kind: (typeof code === 'string' && Object.hasOwn(PREPARATION_KINDS, code) ? PREPARATION_KINDS[code] : undefined) ??
+            'preparation_failed',
+        error,
+    };
 };
 // Parse boundary: the call's arguments, already checked against the tool's input schema.
 export const prepareOutcome = async (input, dependencies, adapters, route) => {

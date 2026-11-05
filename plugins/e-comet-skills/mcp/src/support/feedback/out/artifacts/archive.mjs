@@ -1,5 +1,5 @@
-import { FEEDBACK_MAX_BYTES } from '../../domain/constants/limits.const.mjs';
 import { writeZip, ZIP_END_RECORD_BYTES, zipEntryFramingBytes } from '../../../../storage/writers/zip.mjs';
+import { FEEDBACK_MAX_BYTES } from '../../domain/constants/limits.const.mjs';
 const assertBytes = (value, name, { allowEmpty = true } = {}) => {
     if (!Buffer.isBuffer(value))
         throw new TypeError(`Feedback ${name} bytes must be a Buffer`);
@@ -15,7 +15,7 @@ const entryNames = (includeTranscript, includeExtensionLog = false) => [
 export const feedbackZipFramingBytes = ({ includeTranscript = false, includeExtensionLog = false } = {}) => entryNames(includeTranscript, includeExtensionLog)
     .map((name) => Buffer.from(name, 'utf8'))
     .reduce((total, nameBytes) => total + zipEntryFramingBytes(nameBytes), ZIP_END_RECORD_BYTES);
-export const createFeedbackZip = async ({ reportBytes, metadataBytes, transcriptBytes, extensionLogBytes } = {}, options = {}) => {
+export const createFeedbackZip = async ({ reportBytes, metadataBytes, transcriptBytes, extensionLogBytes, } = {}, options = {}) => {
     const { maxBytes = FEEDBACK_MAX_BYTES } = options;
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
         throw new RangeError('Feedback package byte limit must be a positive safe integer');
@@ -31,7 +31,10 @@ export const createFeedbackZip = async ({ reportBytes, metadataBytes, transcript
         ...(transcriptBytes === undefined ? [] : [{ name: 'transcript.jsonl', bytes: transcriptBytes }]),
         ...(extensionLogBytes === undefined ? [] : [{ name: 'extension-log.json', bytes: extensionLogBytes }]),
     ];
-    const framingBytes = feedbackZipFramingBytes({ includeTranscript: transcriptBytes !== undefined, includeExtensionLog: extensionLogBytes !== undefined });
+    const framingBytes = feedbackZipFramingBytes({
+        includeTranscript: transcriptBytes !== undefined,
+        includeExtensionLog: extensionLogBytes !== undefined,
+    });
     const totalEntryBytes = entries.reduce((total, entry) => total + entry.bytes.length, 0);
     if (totalEntryBytes + framingBytes > maxBytes) {
         throw new RangeError(`Feedback combined entries and ZIP framing exceed the ${maxBytes}-byte package limit`);

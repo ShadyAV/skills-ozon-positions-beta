@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { FEEDBACK_MAX_BYTES } from '../../domain/constants/limits.const.mjs';
-import { completeJsonlTail, transcriptUnavailable, truncatedTranscripts } from '../../domain/policies/transcript-tail.policy.mjs';
+import { completeJsonlTail, transcriptUnavailable, truncatedTranscripts, } from '../../domain/policies/transcript-tail.policy.mjs';
 import { safeFeedbackProperty } from '../../../../transport/failures/evidence.mjs';
 // Compare bigint stats: NTFS file IDs exceed 2^53, and neighbouring IDs collide as numbers.
 const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
@@ -26,8 +26,6 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
     const { lstatImpl = lstat, openImpl = open, maxBytes = FEEDBACK_MAX_BYTES } = options;
     if (typeof path !== 'string' || path.length === 0)
         throw transcriptUnavailable();
-    if (typeof lstatImpl !== 'function' || typeof openImpl !== 'function' || !Number.isSafeInteger(maxBytes) || maxBytes < 0)
-        throw transcriptUnavailable();
     let handle;
     try {
         const before = await lstatImpl(path, { bigint: true });
@@ -38,7 +36,11 @@ export const readTrustedFeedbackTranscript = async (path, options = {}) => {
         handle = await openImpl(path, constants.O_RDONLY | constants.O_NOFOLLOW);
         const descriptor = await handle.stat({ bigint: true });
         const after = await lstatImpl(path, { bigint: true });
-        if (!descriptor.isFile() || !after.isFile() || after.isSymbolicLink() || !sameFile(before, descriptor) || !sameFile(descriptor, after)) {
+        if (!descriptor.isFile() ||
+            !after.isFile() ||
+            after.isSymbolicLink() ||
+            !sameFile(before, descriptor) ||
+            !sameFile(descriptor, after)) {
             throw transcriptUnavailable();
         }
         const size = Number(descriptor.size);

@@ -1,4 +1,5 @@
 import { parseReportPackageItems } from './package.policy.mjs';
+import { isNonNegativeSafeInteger } from '../../../shared/values.mjs';
 const CANONICAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UTC_DAY_MS = 24 * 60 * 60 * 1000;
 export const MAX_OZON_ANALYTICS_INCLUSIVE_DAYS = 731;
@@ -9,7 +10,7 @@ const parseCanonicalDate = (value) => {
     return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value ? timestamp : NaN;
 };
 const moscowDateAt = (issuedAtSeconds) => {
-    if (!Number.isSafeInteger(issuedAtSeconds) || issuedAtSeconds < 0)
+    if (!isNonNegativeSafeInteger(issuedAtSeconds))
         return undefined;
     const instant = new Date(issuedAtSeconds * 1000);
     if (!Number.isFinite(instant.getTime()))
@@ -29,7 +30,9 @@ export const parseAnalyticsDateRange = (dateFrom, dateTo) => {
     const fromMs = parseCanonicalDate(dateFrom);
     const toMs = parseCanonicalDate(dateTo);
     const inclusiveDays = (toMs - fromMs) / UTC_DAY_MS + 1;
-    if (!Number.isFinite(fromMs) ||
+    if (typeof dateFrom !== 'string' ||
+        typeof dateTo !== 'string' ||
+        !Number.isFinite(fromMs) ||
         !Number.isFinite(toMs) ||
         toMs < fromMs ||
         !Number.isSafeInteger(inclusiveDays) ||
@@ -38,16 +41,14 @@ export const parseAnalyticsDateRange = (dateFrom, dateTo) => {
     return { dateFrom, dateTo, fromMs, toMs, inclusiveDays };
 };
 export const parseOzonAnalyticsPeriod = (dateFrom, dateTo, issuedAtSeconds) => {
-    const { fromMs, toMs, inclusiveDays } = parseAnalyticsDateRange(dateFrom, dateTo);
+    const { fromMs, toMs, inclusiveDays, ...range } = parseAnalyticsDateRange(dateFrom, dateTo);
     const issuedOnMoscow = moscowDateAt(issuedAtSeconds);
     const issuedMs = parseCanonicalDate(issuedOnMoscow);
     const earliestMs = issuedMs - (MAX_OZON_ANALYTICS_INCLUSIVE_DAYS - 1) * UTC_DAY_MS;
-    if (!Number.isFinite(issuedMs) ||
-        fromMs < earliestMs ||
-        toMs > issuedMs) {
+    if (!Number.isFinite(issuedMs) || fromMs < earliestMs || toMs > issuedMs) {
         throw new TypeError('Ozon analytics period must be canonical, ordered, at most 731 inclusive days, and inside the signed Moscow issuance window.');
     }
-    return { dateFrom, dateTo, inclusiveDays, issuedOnMoscow };
+    return { dateFrom: range.dateFrom, dateTo: range.dateTo, inclusiveDays, issuedOnMoscow };
 };
 export const parseOzonAnalyticsBreakdown = (value) => {
     if (value !== 'period' && value !== 'daily')

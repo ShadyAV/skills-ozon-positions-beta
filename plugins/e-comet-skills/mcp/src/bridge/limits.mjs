@@ -17,7 +17,7 @@ export const MAX_ACTIVE_AUTHORIZATION_SCOPES = 32;
 // and the reader reports `truncated` instead of guessing. One profile is read: that of the browser the cause names.
 // timeoutMs bounds every file read of that pass: a failing call already waits up to a minute for the broker and for
 // the repair of its registration, so the read adds seconds, never another wait.
-export const EXTENSION_LOG_LIMITS = Object.freeze({ maxFileBytes: 8 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024, timeoutMs: 2000 });
+export const EXTENSION_LOG_LIMITS = { maxFileBytes: 8 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024, timeoutMs: 2000 };
 /**
  * The origin the broker registration admits: the published extension, or the first unpacked one a test or development
  * run names through the extension-id override. The override is honoured only under NODE_ENV test or development:
@@ -26,6 +26,9 @@ export const EXTENSION_LOG_LIMITS = Object.freeze({ maxFileBytes: 8 * 1024 * 102
 export const registrationOrigin = (env) => {
     if (env.ECOMET_ENABLE_EXTENSION_ID_OVERRIDE !== '1' || !['test', 'development'].includes(env.NODE_ENV ?? ''))
         return EXTENSION_ORIGIN;
-    const [first] = (env.ECOMET_ALLOWED_EXTENSION_IDS || '').split(',').map((value) => value.trim()).filter(Boolean);
+    const [first] = (env.ECOMET_ALLOWED_EXTENSION_IDS || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
     return first === undefined ? EXTENSION_ORIGIN : `chrome-extension://${first}/`;
 };

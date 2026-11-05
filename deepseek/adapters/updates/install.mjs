@@ -1,8 +1,9 @@
 import { cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
+import { isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 import { RETRY_POLICIES, retryTransientFileOperation } from '../../../plugins/e-comet-skills/mcp/src/storage/files/transient-retry.mjs';
 /** pnpm restores its manifest/lockfile on failure, but not partially replaced package files. */
-export async function installSafely({ packageRoot, backupRoot, pause, resume, install }) {
+export async function installSafely({ packageRoot, backupRoot, pause, resume, install, }) {
     await mkdir(backupRoot, { recursive: true });
     const backup = await mkdtemp(join(backupRoot, 'update-'));
     const saved = join(backup, 'package');
@@ -27,8 +28,11 @@ export async function installSafely({ packageRoot, backupRoot, pause, resume, in
             await retryTransientFileOperation(async () => {
                 // Restore the exact snapshot: files the partial install added (a newer skill) must not survive.
                 // A failed install may have removed the directory itself; cp below recreates it.
-                const entries = await readdir(packageRoot).catch(error => { if (error.code === 'ENOENT')
-                    return []; throw error; });
+                const entries = await readdir(packageRoot).catch((error) => {
+                    if (isRecord(error) && error.code === 'ENOENT')
+                        return [];
+                    throw error;
+                });
                 for (const entry of entries) {
                     if (entry !== 'node_modules')
                         await rm(join(packageRoot, entry), { recursive: true, force: true });

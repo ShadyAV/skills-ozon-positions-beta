@@ -1,13 +1,22 @@
-import { array, boolean, described, nonNegativeInteger, nullable, number, object, objectUnion, positiveInteger, string } from '../../../transport/mcp/schema.mjs';
-import { DIAGNOSTIC_STATES } from '../../../transport/diagnostics/vocabulary.mjs';
+import { BRIDGE_COMSPEC_STATES, BRIDGE_OWNERS, BRIDGE_REGISTRATION_STATES, BRIDGE_RUNTIMES, BRIDGE_RUNTIME_RECHECKS, BRIDGE_STATUS_CODES, } from '../../../transport/diagnostics/bridge-codes.mjs';
 import { EXTENSION_INSTALL_VOCABULARY, HOST_LAST_FAILURES, extensionLogFactsSchema } from '../../../transport/diagnostics/facts.mjs';
-import { BRIDGE_COMSPEC_STATES, BRIDGE_OWNERS, BRIDGE_REGISTRATION_STATES, BRIDGE_RUNTIMES, BRIDGE_RUNTIME_RECHECKS, BRIDGE_STATUS_CODES } from '../../../transport/diagnostics/bridge-codes.mjs';
+import { DIAGNOSTIC_STATES } from '../../../transport/diagnostics/vocabulary.mjs';
 import { TRANSPORT_EVENT_KINDS } from '../../../transport/extension/events.mjs';
-const storageTargetStatusSchema = objectUnion(described(object({ state: described({ const: 'ready' }, 'Configuration resolved a target; this does not prove the target is writable.'), backend: described({ type: 'string', enum: ['plugin_data', 'application_data', 'override'] }, 'Configuration source that resolved this target, without exposing its filesystem path.') }, ['state', 'backend']), 'A configured target resolved successfully; no write was attempted.'), described(object({
+import { array, boolean, described, nonNegativeInteger, nullable, number, object, objectUnion, positiveInteger, string, } from '../../../transport/mcp/schema.mjs';
+const storageTargetStatusSchema = objectUnion(described(object({
+    state: described({ const: 'ready' }, 'Configuration resolved a target; this does not prove the target is writable.'),
+    backend: described({ type: 'string', enum: ['plugin_data', 'application_data', 'override'] }, 'Configuration source that resolved this target, without exposing its filesystem path.'),
+}, ['state', 'backend']), 'A configured target resolved successfully; no write was attempted.'), described(object({
     state: described({ const: 'unavailable' }, 'Configuration could not resolve this target; this does not identify a host-installation failure.'),
     reason: described({
         type: 'string',
-        enum: ['plugin_data_missing', 'plugin_data_invalid', 'plugin_data_conflict', 'application_data_invalid', 'override_invalid'],
+        enum: [
+            'plugin_data_missing',
+            'plugin_data_invalid',
+            'plugin_data_conflict',
+            'application_data_invalid',
+            'override_invalid',
+        ],
     }, 'Closed configuration reason for the unavailable target; paths and raw environment values are omitted.'),
 }, ['state', 'reason']), 'A configured target could not be resolved; this does not prove the plugin is absent or disabled.'));
 const storageStatusSchema = object({
@@ -16,17 +25,51 @@ const storageStatusSchema = object({
     feedbackArtifacts: described(storageTargetStatusSchema, 'Resolved storage configuration for explicit-consent feedback artifacts.'),
 }, ['results', 'marketplaceArtifacts', 'feedbackArtifacts']);
 const diagnosticBase = (check, facts, causes = ['unknown']) => object({
-    check: described({ const: check }, 'Stable identifier for the observation represented by this check.'), state: described({ type: 'string', enum: DIAGNOSTIC_STATES }, 'Result of this bounded observation; unknown and unsupported remain distinct from failure.'), observedAt: described(string, 'ISO timestamp at which this check made its observation.'),
-    source: described(string, 'Component that produced this fact, without implying evidence from another execution plane.'), executionPlane: described(string, 'Execution plane on which the check actually ran.'), ...(facts ? { facts: described(facts, 'Typed facts observed by this check; omitted when the source supplied no safe facts.') } : {}),
-    cause: described({ type: 'string', enum: causes }, 'Safe closed cause classification; omitted when the state needs no cause or none was observed.'), evidenceRefs: described(array(described(string, 'One safe reference to separately retained evidence, not an embedded path or raw error.')), 'Safe references to separately retained evidence; omitted when no such evidence exists.'), nextCheck: described(string, 'Smallest named observation that can discriminate the remaining uncertainty; omitted when none is needed.'),
+    check: described({ const: check }, 'Stable identifier for the observation represented by this check.'),
+    state: described({ type: 'string', enum: DIAGNOSTIC_STATES }, 'Result of this bounded observation; unknown and unsupported remain distinct from failure.'),
+    observedAt: described(string, 'ISO timestamp at which this check made its observation.'),
+    source: described(string, 'Component that produced this fact, without implying evidence from another execution plane.'),
+    executionPlane: described(string, 'Execution plane on which the check actually ran.'),
+    ...(facts
+        ? { facts: described(facts, 'Typed facts observed by this check; omitted when the source supplied no safe facts.') }
+        : {}),
+    cause: described({ type: 'string', enum: causes }, 'Safe closed cause classification; omitted when the state needs no cause or none was observed.'),
+    evidenceRefs: described(array(described(string, 'One safe reference to separately retained evidence, not an embedded path or raw error.')), 'Safe references to separately retained evidence; omitted when no such evidence exists.'),
+    nextCheck: described(string, 'Smallest named observation that can discriminate the remaining uncertainty; omitted when none is needed.'),
 }, ['check', 'state', 'observedAt', 'source', 'executionPlane']);
 const bridgeDiagnosticsSchema = object({
     snapshot: described(diagnosticBase('snapshot'), 'Timestamped production of the status snapshot; it is not a product-health verdict.'),
-    runtime: described(diagnosticBase('runtime', object({ nodeVersion: described(string, 'Version of the Node.js process executing this MCP server.'), platform: described(string, 'Node.js platform identifier for the process executing this MCP server.'), arch: described(string, 'Node.js architecture identifier for the process executing this MCP server.'), bridgeVersion: described(string, 'Version of the local bridge build executing this check.'), mcpProtocolVersion: described(string, 'MCP protocol version negotiated with the current client; omitted when unavailable.'), osRelease: described(string, 'Release of the operating system kernel, as os.release() reports it.') }, ['nodeVersion', 'platform', 'arch', 'bridgeVersion'])), 'Facts about the Node.js process running this MCP server.'),
-    client: described(diagnosticBase('client', object({ name: described(string, 'Bounded client name supplied in MCP initialize metadata.'), version: described(string, 'Bounded client version supplied in MCP initialize metadata.'), provenance: described({ const: 'client_reported' }, 'Marks these values as client-reported rather than trusted host identity.'), hostRuntimeVersion: described(string, 'DeepSeek Harness runtime version the native adapter resolved its peers against; present only under that adapter.'), hostLastFailure: described({ type: 'string', enum: [...HOST_LAST_FAILURES] }, 'Closed class of the last failure of the local module the native DeepSeek adapter started again; present only under that adapter after a failure.'), hostRestarts: described(nonNegativeInteger, 'How many times the native DeepSeek adapter started the local module again; present only under that adapter after a restart.') }, ['name', 'version', 'provenance'])), 'Sanitized MCP initialize metadata; it does not prove host identity or hook support.'),
-    routeFreshness: described(diagnosticBase('route_freshness', object({ lastObservedAt: described(string, 'Timestamp of an actually observed route response; omitted when no producer supplies one.') }, ['lastObservedAt'])), 'Freshness of a real extension-route observation, never inferred from browser-context changes.'),
-    extensionLog: described(diagnosticBase('extension_log', extensionLogFactsSchema, ['permission_denied', 'io_error', 'directory_absent', 'corrupt', 'unavailable', 'unknown']), 'The e-Comet extension\'s own record of its native connection, read from the browser profile on disk by the last tool call that found no broker or the last runtime extension_log diagnosis; present only after one, and dropped when a broker connects.'),
-    storage: described(diagnosticBase('storage', object({ scope: described({ const: 'configuration' }, 'Declares that these storage facts cover configuration resolution only.'), targets: described(storageStatusSchema, 'Sanitized configured storage targets without paths or write claims.') }, ['scope', 'targets'])), 'Read-only storage configuration observation; it does not test writability.'),
+    runtime: described(diagnosticBase('runtime', object({
+        nodeVersion: described(string, 'Version of the Node.js process executing this MCP server.'),
+        platform: described(string, 'Node.js platform identifier for the process executing this MCP server.'),
+        arch: described(string, 'Node.js architecture identifier for the process executing this MCP server.'),
+        bridgeVersion: described(string, 'Version of the local bridge build executing this check.'),
+        mcpProtocolVersion: described(string, 'MCP protocol version negotiated with the current client; omitted when unavailable.'),
+        osRelease: described(string, 'Release of the operating system kernel, as os.release() reports it.'),
+    }, ['nodeVersion', 'platform', 'arch', 'bridgeVersion'])), 'Facts about the Node.js process running this MCP server.'),
+    client: described(diagnosticBase('client', object({
+        name: described(string, 'Bounded client name supplied in MCP initialize metadata.'),
+        version: described(string, 'Bounded client version supplied in MCP initialize metadata.'),
+        provenance: described({ const: 'client_reported' }, 'Marks these values as client-reported rather than trusted host identity.'),
+        hostRuntimeVersion: described(string, 'DeepSeek Harness runtime version the native adapter resolved its peers against; present only under that adapter.'),
+        hostLastFailure: described({ type: 'string', enum: [...HOST_LAST_FAILURES] }, 'Closed class of the last failure of the local module the native DeepSeek adapter started again; present only under that adapter after a failure.'),
+        hostRestarts: described(nonNegativeInteger, 'How many times the native DeepSeek adapter started the local module again; present only under that adapter after a restart.'),
+    }, ['name', 'version', 'provenance'])), 'Sanitized MCP initialize metadata; it does not prove host identity or hook support.'),
+    routeFreshness: described(diagnosticBase('route_freshness', object({
+        lastObservedAt: described(string, 'Timestamp of an actually observed route response; omitted when no producer supplies one.'),
+    }, ['lastObservedAt'])), 'Freshness of a real extension-route observation, never inferred from browser-context changes.'),
+    extensionLog: described(diagnosticBase('extension_log', extensionLogFactsSchema, [
+        'permission_denied',
+        'io_error',
+        'directory_absent',
+        'corrupt',
+        'unavailable',
+        'unknown',
+    ]), "The e-Comet extension's own record of its native connection, read from the browser profile on disk by the last tool call that found no broker or the last runtime extension_log diagnosis; present only after one, and dropped when a broker connects."),
+    storage: described(diagnosticBase('storage', object({
+        scope: described({ const: 'configuration' }, 'Declares that these storage facts cover configuration resolution only.'),
+        targets: described(storageStatusSchema, 'Sanitized configured storage targets without paths or write claims.'),
+    }, ['scope', 'targets'])), 'Read-only storage configuration observation; it does not test writability.'),
 }, ['snapshot', 'runtime', 'client', 'routeFreshness', 'storage']);
 const bridgeStatusSchema = described(object({
     ok: described({ const: true }, 'Confirms that the status response was constructed; it is not a product-health result.'),
@@ -35,7 +78,17 @@ const bridgeStatusSchema = described(object({
     comspec: described({ type: 'string', enum: [...BRIDGE_COMSPEC_STATES] }, 'Whether the Windows ComSpec variable names an existing cmd.exe, read by the last tool call that found no broker or runtime extension_log diagnosis; unknown when this process has no ComSpec, since it sees its host environment, not the browser one; present only on Windows with code BRIDGE_HOST_START_FAILED.'),
     extensionConnected: described(boolean, 'Whether this process currently holds an extension session through a broker.'),
     browserJobSupported: described(boolean, 'Whether the effective route advertised browser-job support; it does not prove a particular operation will succeed.'),
-    state: described({ type: 'string', enum: ['initializing', 'waiting_for_extension', 'extension_connected_no_wb_tab', 'extension_context_unknown', 'ready', 'extension_update_required'] }, 'Ordered compatibility summary of observed bridge state, not a complete fault list or retry instruction.'),
+    state: described({
+        type: 'string',
+        enum: [
+            'initializing',
+            'waiting_for_extension',
+            'extension_connected_no_wb_tab',
+            'extension_context_unknown',
+            'ready',
+            'extension_update_required',
+        ],
+    }, 'Ordered compatibility summary of observed bridge state, not a complete fault list or retry instruction.'),
     extension: described(object({
         state: described({ type: 'string', enum: ['never_connected', 'connected', 'disconnected'] }, 'Effective extension connection observation, including retained disconnected state.'),
         route: described({ type: 'string', enum: ['direct', 'none'] }, 'direct while this process holds an extension session through a broker, otherwise none.'),
@@ -46,15 +99,25 @@ const bridgeStatusSchema = described(object({
         ozonSellerPromotionReportsSupported: described(boolean, 'Capability reported for packaged Ozon promotion reports; omission means unobserved.'),
         ozonSellerAnalyticsReportSupported: described(boolean, 'Capability reported for an Ozon analytics report; omission means unobserved.'),
         ozonSearchPositionsSupported: described(boolean, 'Capability reported for Ozon search positions; omission means unobserved.'),
-    }, ['state', 'route']), 'Browser-extension observation from this process\'s broker session.'),
+    }, ['state', 'route']), "Browser-extension observation from this process's broker session."),
     browserContext: described(object({
         state: described({ type: 'string', enum: ['unknown', 'known'] }, 'Whether registered WB browser-port facts were observed.'),
         wbTabConnected: described(boolean, 'Whether the extension reports a registered standalone WB page port; this does not prove login.'),
         sellerTabConnected: described(boolean, 'Whether the extension reports a registered WB Seller page port; this does not describe Ozon.'),
         changedAt: described(string, 'ISO timestamp when the registered-port observation changed; it is not a freshness guarantee.'),
     }, ['state']), 'Extension-reported WB and WB Seller port registration; it does not cover Ozon readiness.'),
-    extensionLastConnectedAtMs: described({ oneOf: [described(number, 'Observed effective extension connection time as Unix epoch milliseconds.'), described({ type: 'null' }, 'No effective extension connection has ever been observed.')] }, 'Legacy millisecond copy of the effective extension connection time; null means never observed.'),
-    extensionLastDisconnectedAtMs: described({ oneOf: [described(number, 'Observed effective extension disconnection time as Unix epoch milliseconds.'), described({ type: 'null' }, 'No effective extension disconnection has ever been observed.')] }, 'Legacy millisecond copy of the effective extension disconnection time; null means never observed.'),
+    extensionLastConnectedAtMs: described({
+        oneOf: [
+            described(number, 'Observed effective extension connection time as Unix epoch milliseconds.'),
+            described({ type: 'null' }, 'No effective extension connection has ever been observed.'),
+        ],
+    }, 'Legacy millisecond copy of the effective extension connection time; null means never observed.'),
+    extensionLastDisconnectedAtMs: described({
+        oneOf: [
+            described(number, 'Observed effective extension disconnection time as Unix epoch milliseconds.'),
+            described({ type: 'null' }, 'No effective extension disconnection has ever been observed.'),
+        ],
+    }, 'Legacy millisecond copy of the effective extension disconnection time; null means never observed.'),
     extensionVersion: described(string, 'Legacy copy of the effective extension version; it is not independent evidence.'),
     ozonSellerPromotionReportSupported: described(boolean, 'Legacy copy of the single-promotion-report capability; omission means unobserved.'),
     ozonSellerPromotionReportsSupported: described(boolean, 'Legacy copy of the packaged-promotion-reports capability; omission means unobserved.'),
@@ -124,7 +187,7 @@ export const schemaContractTerms = (schema = bridgeStatusSchema) => {
             visit(child, path ? `${path}.${name}` : name);
     };
     visit(schema, '');
-    return Object.freeze([...terms].sort());
+    return [...terms].sort();
 };
 export const contract = {
     name: 'local_bridge_status',

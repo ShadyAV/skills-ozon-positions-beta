@@ -55,7 +55,9 @@ export class ConnectionState {
         if (session !== this.extensionSession)
             return false;
         const previous = this.browserContext;
-        if (previous.state === 'known' && previous.wbTabConnected === context.wbTabConnected && previous.sellerTabConnected === context.sellerTabConnected)
+        if (previous.state === 'known' &&
+            previous.wbTabConnected === context.wbTabConnected &&
+            previous.sellerTabConnected === context.sellerTabConnected)
             return false;
         this.browserContext = { state: 'known', ...context, changedAt: new Date(this.#now()).toISOString() };
         return true;

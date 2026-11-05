@@ -1,7 +1,8 @@
+import { serializeSessionLog } from '@deepseek-ai/dsh-session-log-export';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { serializeSessionLog } from '@deepseek-ai/dsh-session-log-export';
+import { isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 import { RETRY_POLICIES, retryTransientFileOperation } from '../../../plugins/e-comet-skills/mcp/src/storage/files/transient-retry.mjs';
 import { extractPreparedMetadata } from '../../../plugins/e-comet-skills/mcp/src/support/feedback/contract/results.mjs';
 import { FEEDBACK_ARTIFACT_RETENTION_MS } from '../../../plugins/e-comet-skills/mcp/src/support/feedback/domain/constants/limits.const.mjs';
@@ -18,7 +19,7 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
         }
         catch (error) {
             // Cleanup must preserve completed work. Retain only this owned snapshot on refusal;
-            // no cross-session sweep: docs/local-agent-architecture.md#accepted-residuals.
+            // no cross-session sweep: docs/architecture/residuals/feedback.md.
             const logger = ctx.logger ?? console;
             logger.warn(`FEEDBACK_SNAPSHOT_CLEANUP_PENDING: The owned chat snapshot could not be removed. ${JSON.stringify(feedbackDiagnostics(error, 'transcript_read'))}`);
         }
@@ -47,7 +48,7 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
     return {
         async prepared(exec) {
             // Recovery owns current-session receipts and arguments; diagnostic pairing excludes feedback
-            // and authored arguments. Keep these boundaries separate: docs/local-agent-architecture.md#accepted-residuals.
+            // and authored arguments. Keep these boundaries separate: docs/architecture/residuals/feedback.md.
             const observation = await observe(exec);
             const pending = new Map();
             let latest;
@@ -60,7 +61,7 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
                 for (const record of observation.events.slice(inherited)) {
                     exec.signal.throwIfAborted();
                     const data = record.data;
-                    if (!data || typeof data !== 'object')
+                    if (!isRecord(data))
                         continue;
                     const direct = record.type === 'tool/call';
                     const nested = record.type === 'tool/ptc-dispatch-start';
@@ -69,20 +70,27 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
                         if (typeof id !== 'string')
                             continue;
                         try {
-                            pending.set(`${direct ? 'direct' : 'ptc'}:${id}`, typeof data.arguments === 'string' ? JSON.parse(data.arguments) : data.arguments);
+                            const input = typeof data.arguments === 'string' ? JSON.parse(data.arguments) : data.arguments;
+                            pending.set(`${direct ? 'direct' : 'ptc'}:${id}`, input);
                         }
-                        catch { /* malformed history is not recovery evidence */ }
+                        catch {
+                            /* malformed history is not recovery evidence */
+                        }
                         continue;
                     }
                     const message = record.type === 'tool/result' ? data.message : record.type === 'tool/ptc-dispatch' ? data : undefined;
-                    if (!message || (record.type === 'tool/result' && message.role !== 'tool')
-                        || (record.type === 'tool/ptc-dispatch' && message.name !== 'mcp__e-comet-local__prepare_e_comet_feedback'))
+                    if (!isRecord(message) ||
+                        (record.type === 'tool/result' && message.role !== 'tool') ||
+                        (record.type === 'tool/ptc-dispatch' && message.name !== 'mcp__e-comet-local__prepare_e_comet_feedback'))
                         continue;
                     const key = `${record.type === 'tool/result' ? 'direct' : 'ptc'}:${message.toolCallId ?? message.subCallId}`;
                     const input = pending.get(key);
                     pending.delete(key);
-                    if (!input || message.isError === true || !Number.isSafeInteger(record.time)
-                        || record.time > Date.now() + 5000 || Date.now() - record.time > FEEDBACK_ARTIFACT_RETENTION_MS)
+                    if (!isRecord(input) ||
+                        message.isError === true ||
+                        !Number.isSafeInteger(record.time) ||
+                        record.time > Date.now() + 5000 ||
+                        Date.now() - record.time > FEEDBACK_ARTIFACT_RETENTION_MS)
                         continue;
                     try {
                         const response = { content: message.content };
@@ -90,7 +98,9 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
                         if (metadata.kind === input.kind && metadata.transcriptIncluded === input.includeTranscript)
                             latest = { metadata, input, response };
                     }
-                    catch { /* only a committed successful prepared receipt qualifies */ }
+                    catch {
+                        /* only a committed successful prepared receipt qualifies */
+                    }
                 }
                 return latest;
             }
@@ -106,16 +116,26 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
             // names neither (accepted residual "Opting out of history still sends the connection rows").
             const history = includeTranscript ? 'с полной историей чата' : 'без истории чата';
             const english = includeTranscript ? 'with the complete chat history' : 'without chat history';
-            const ru = phase === 'prepare' ? `Подготовить отчёт для поддержки e-Comet ${history}? Отправка потребует отдельного подтверждения.`
+            const ru = phase === 'prepare'
+                ? `Подготовить отчёт для поддержки e-Comet ${history}? Отправка потребует отдельного подтверждения.`
                 : `Отправить подготовленный отчёт в поддержку e-Comet ${history}?`;
             // Capture the policy used by this request, before an answerer can change it.
             const policy = approval.overrideOf?.(exec.agent.session) ?? approval.config?.policy ?? 'ask';
             let outcome;
             try {
-                outcome = await approval.request({ agent: exec.agent, toolName: exec.name, callId: exec.callId, signal: exec.signal,
+                outcome = await approval.request({
+                    agent: exec.agent,
+                    toolName: exec.name,
+                    callId: exec.callId,
+                    signal: exec.signal,
                     reason: `e-Comet feedback ${phase}; includeTranscript=${includeTranscript}`,
-                    displayReason: { ru, en: phase === 'prepare' ? `Prepare an e-Comet support report ${english}? Sending requires separate approval.`
-                            : `Send the prepared report to e-Comet support ${english}?` } });
+                    displayReason: {
+                        ru,
+                        en: phase === 'prepare'
+                            ? `Prepare an e-Comet support report ${english}? Sending requires separate approval.`
+                            : `Send the prepared report to e-Comet support ${english}?`,
+                    },
+                });
             }
             catch {
                 // The backend error can name host storage; a failed request is the same as no approval service.
@@ -135,17 +155,25 @@ export function createNativeFeedbackServices(ctx, { dataDirectory }) {
                 const path = join(directory, 'session.jsonl');
                 // Preserve original host records. The shared collector applies its documented complete-record tail budget.
                 // Full export cost is accepted separately from the collector's tail bound:
-                // docs/local-agent-architecture.md#accepted-residuals, "Native feedback full-session export cost".
+                // docs/architecture/residuals/feedback.md, "Native feedback full-session export cost".
                 await writeFile(path, serializeSessionLog(observation.header, observation.events), { mode: 0o600 });
                 exec.signal.throwIfAborted();
-                return { path, async dispose() { await removeSnapshot(directory); } };
+                const owned = directory;
+                return {
+                    path,
+                    async dispose() {
+                        await removeSnapshot(owned);
+                    },
+                };
             }
             catch (error) {
                 if (directory)
                     await removeSnapshot(directory);
                 if (exec.signal.aborted)
                     throw exec.signal.reason;
-                throw unavailable(error?.code === 'FEEDBACK_TRANSCRIPT_UNAVAILABLE' ? 'The native snapshot does not match the current chat.' : 'The current chat could not be read.');
+                throw unavailable(isRecord(error) && error.code === 'FEEDBACK_TRANSCRIPT_UNAVAILABLE'
+                    ? 'The native snapshot does not match the current chat.'
+                    : 'The current chat could not be read.');
             }
             finally {
                 observation[Symbol.dispose]();

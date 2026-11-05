@@ -1,7 +1,8 @@
-import { artifactFailureDetails } from '../../transport/failures/vocabulary.mjs';
-import { artifactFailureMessage } from '../../transport/failures/vocabulary.mjs';
 import { ozonPackageStopReason, rejectedOzonPackage } from '../domain/converters/package-result.converter.mjs';
 import { countRunProgress } from '../../shared/run-progress.mjs';
+import { isRecord } from '../../shared/values.mjs';
+import { artifactFailureDetails } from '../../transport/failures/vocabulary.mjs';
+import { artifactFailureMessage } from '../../transport/failures/vocabulary.mjs';
 const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const IMMEDIATE_ABORT_CODES = new Set([
     'OZON_AUTHORIZATION_REJECTED',
@@ -25,10 +26,7 @@ const SYSTEMIC_CODES = new Set([
     'POLL_EXHAUSTED',
     'DOWNLOAD_REJECTED',
 ]);
-const PRIVATE_ARTIFACT_CODES = new Set([
-    'ARTIFACT_CLEANUP_FAILED',
-    'JOB_ARTIFACT_QUOTA_EXCEEDED',
-]);
+const PRIVATE_ARTIFACT_CODES = new Set(['ARTIFACT_CLEANUP_FAILED', 'JOB_ARTIFACT_QUOTA_EXCEEDED']);
 const artifactResources = new WeakMap();
 const publicArtifact = ({ name, mimeType, size, sha256 }) => ({ name, mimeType, size, sha256 });
 const createOzonPackageAbortPolicy = () => {
@@ -107,11 +105,15 @@ jobBudget, artifactName, normalizeError, }) => {
     let rejection;
     let notStarted = false;
     const normalizedFailure = (item, error) => {
-        if (PRIVATE_ARTIFACT_CODES.has(error?.code)) {
+        if (PRIVATE_ARTIFACT_CODES.has(isRecord(error) ? error.code : undefined)) {
             const details = artifactFailureDetails(error);
-            return { ...item, status: 'failed', error: details ? { ...artifactFailure, message: artifactFailureMessage(details), details } : artifactFailure };
+            return {
+                ...item,
+                status: 'failed',
+                error: details ? { ...artifactFailure, message: artifactFailureMessage(details), details } : artifactFailure,
+            };
         }
-        let safe = unclassifiedFailure;
+        let safe;
         try {
             safe = normalizeError(error);
         }
@@ -131,7 +133,7 @@ jobBudget, artifactName, normalizeError, }) => {
             if (deferCleanup) {
                 // The broker fenced this item's active writer. Its writer removes only its own
                 // `.part`; a blocked syscall cannot delay the authenticated failure.
-                void cleanup.catch(() => undefined);
+                cleanup.catch(() => undefined);
                 return undefined;
             }
             await cleanup;
@@ -166,14 +168,14 @@ jobBudget, artifactName, normalizeError, }) => {
                 const stream = {};
                 streams.set(itemIndex, stream);
                 stream.writer = await createArtifactWriter({
-                    fileName: artifactName(items[itemIndex], itemIndex),
+                    fileName: artifactName(items[itemIndex] ?? {}, itemIndex),
                     mimeType: XLSX_MIME_TYPE,
                     validateXlsx: true,
                     jobBudget,
                     ...(signal === undefined ? {} : { signal }),
                 });
                 if (stream.cancelled)
-                    void stream.writer.abort().catch(() => undefined);
+                    stream.writer.abort().catch(() => undefined);
             },
             onItemChunk: async (itemIndex, chunkIndex, data) => {
                 activeIndex = itemIndex;
@@ -198,9 +200,10 @@ jobBudget, artifactName, normalizeError, }) => {
             // Parse boundary: the item result as the extension sent it, checked by the frame validators.
             onItemResult: countRunProgress(items.length, async (itemIndex, remoteResult, { deferCleanup = false, commitArtifact = () => true } = {}) => {
                 activeIndex = itemIndex;
+                const remote = isRecord(remoteResult) ? remoteResult : {};
                 if (abortPolicy.stopped) {
                     await abortStream(itemIndex);
-                    if (remoteResult?.status !== 'skipped') {
+                    if (remote.status !== 'skipped') {
                         throw new Error('Ozon package remainder did not carry an authenticated skipped terminal.');
                     }
                     results[itemIndex] = { ...items[itemIndex], status: 'skipped' };
@@ -209,8 +212,8 @@ jobBudget, artifactName, normalizeError, }) => {
                 const stream = streams.get(itemIndex);
                 let itemResult;
                 let cleanupFailure;
-                if (remoteResult?.status === 'skipped') {
-                    const safe = normalizedFailure(items[itemIndex], remoteResult.error).error;
+                if (remote.status === 'skipped') {
+                    const safe = normalizedFailure(items[itemIndex], remote.error).error;
                     stopCode ??= abortPolicy.reason ?? safe.code;
                     rejection ??= safe;
                     cleanupFailure = await abortStream(itemIndex);
@@ -219,7 +222,7 @@ jobBudget, artifactName, normalizeError, }) => {
                     else
                         itemResult = { ...items[itemIndex], status: 'skipped' };
                 }
-                else if (remoteResult?.ok === true && stream?.artifact) {
+                else if (remote.ok === true && stream?.artifact) {
                     // Publish only after the broker has detached this accepted file
                     // from cancellation. A cancelled/stale handler cannot commit it.
                     if (!commitArtifact())
@@ -229,13 +232,13 @@ jobBudget, artifactName, normalizeError, }) => {
                 }
                 else {
                     cleanupFailure = await abortStream(itemIndex, deferCleanup);
-                    itemResult = normalizedFailure(items[itemIndex], cleanupFailure ?? remoteResult?.error ?? artifactFailure);
+                    itemResult = normalizedFailure(items[itemIndex], cleanupFailure ?? remote.error ?? artifactFailure);
                 }
                 results[itemIndex] = itemResult;
                 const decision = abortPolicy.record(itemResult);
                 if (decision.stop) {
                     stopCode ??= decision.reason;
-                    if (remoteResult?.ok === false && cleanupFailure === undefined)
+                    if (remote.ok === false && cleanupFailure === undefined)
                         return;
                     throw Object.assign(new Error(itemResult.error?.message ?? 'The Ozon report package stopped.'), {
                         code: itemResult.error?.code ?? 'ARTIFACT_REJECTED',
@@ -248,8 +251,8 @@ jobBudget, artifactName, normalizeError, }) => {
         });
     }
     catch (error) {
-        stopCode ??= error?.code;
-        if (notStarted) {
+        stopCode ??= isRecord(error) ? error.code : undefined;
+        if (notStarted && rejection) {
             // A package that never started has its rejection from `onNotStarted`.
             const result = rejectedOzonPackage(jobType, resultProperty, items, rejection);
             artifactResources.set(result, resources);
@@ -258,10 +261,14 @@ jobBudget, artifactName, normalizeError, }) => {
         else if (!results[activeIndex]) {
             // The broker has terminated the package and fenced its writer. Private I/O must not
             // delay the terminal response or replace its cause; the store owns deferred cleanup.
-            void abortStream(activeIndex);
+            abortStream(activeIndex).catch(() => undefined);
             const failure = phases.get(activeIndex) === 'create_dispatched'
-                ? { code: 'CREATE_OUTCOME_UNKNOWN', stage: 'create', retryable: false,
-                    message: 'The Ozon report create outcome could not be confirmed.' }
+                ? {
+                    code: 'CREATE_OUTCOME_UNKNOWN',
+                    stage: 'create',
+                    retryable: false,
+                    message: 'The Ozon report create outcome could not be confirmed.',
+                }
                 : error;
             stopAt(activeIndex, normalizedFailure(items[activeIndex], failure));
         }
@@ -281,7 +288,7 @@ jobBudget, artifactName, normalizeError, }) => {
             : normalizedFailure(items[index], cleanupFailure ?? artifactFailure);
     }
     // Every item has its line by now.
-    const result = packageResult(jobType, resultProperty, results, stopCode, rejection);
+    const result = packageResult(jobType, resultProperty, results.filter((item) => item !== undefined), stopCode, rejection);
     artifactResources.set(result, resources);
     return result;
 };

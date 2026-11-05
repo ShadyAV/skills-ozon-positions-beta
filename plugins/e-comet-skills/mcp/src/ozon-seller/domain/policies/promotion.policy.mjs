@@ -1,3 +1,4 @@
+import { isRecord } from '../../../shared/values.mjs';
 const CANONICAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UTC_DAY_MS = 24 * 60 * 60 * 1000;
 export const MAX_OZON_PROMOTION_INCLUSIVE_DAYS = 89;
@@ -12,7 +13,9 @@ export const parseOzonPromotionPeriod = (dateFrom, dateTo) => {
     const fromMs = parseCanonicalDate(dateFrom);
     const toMs = parseCanonicalDate(dateTo);
     const inclusiveDays = (toMs - fromMs) / UTC_DAY_MS + 1;
-    if (!Number.isFinite(fromMs) ||
+    if (typeof dateFrom !== 'string' ||
+        typeof dateTo !== 'string' ||
+        !Number.isFinite(fromMs) ||
         !Number.isFinite(toMs) ||
         toMs < fromMs ||
         !Number.isSafeInteger(inclusiveDays) ||
@@ -21,10 +24,15 @@ export const parseOzonPromotionPeriod = (dateFrom, dateTo) => {
     }
     return { dateFrom, dateTo, inclusiveDays };
 };
+// A period's own fields; a value that is no object has none, and its period is invalid.
+const periodOf = (value) => {
+    const { dateFrom, dateTo } = isRecord(value) ? value : {};
+    return parseOzonPromotionPeriod(dateFrom, dateTo);
+};
 // Parse boundary: the requested and the signed period, read field by field.
 export const assertOzonPromotionPeriodEqual = (expected, actual) => {
-    const expectedPeriod = parseOzonPromotionPeriod(expected?.dateFrom, expected?.dateTo);
-    const actualPeriod = parseOzonPromotionPeriod(actual?.dateFrom, actual?.dateTo);
+    const expectedPeriod = periodOf(expected);
+    const actualPeriod = periodOf(actual);
     if (expectedPeriod.dateFrom !== actualPeriod.dateFrom || expectedPeriod.dateTo !== actualPeriod.dateTo) {
         throw new TypeError('Authorized Ozon promotion period does not match the requested canonical period.');
     }

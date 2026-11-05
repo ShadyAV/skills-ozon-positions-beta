@@ -1,11 +1,12 @@
+import { missingHandoff } from '../../../handoff/call-result.mjs';
+import { invalidArgumentsMessage, validateArguments } from '../../../mcp-protocol/registry/validate.mjs';
 import { deliverReportResult } from '../../../mcp-protocol/results/links.mjs';
 import { resourceLinkResult, textResult, toolFailure } from '../../../mcp-protocol/results/serialize.mjs';
-import { invalidArgumentsMessage, validateArguments } from '../../../mcp-protocol/registry/validate.mjs';
-import { missingHandoff } from '../../../handoff/call-result.mjs';
-import { failureDetails } from '../../../transport/failures/vocabulary.mjs';
-import { browserJobRejectionDetails } from '../../../transport/failures/rejection.mjs';
 import { ToolExecutionError } from '../../../shared/coded-error.mjs';
 import { REQUEST_TIMEOUT_MS } from '../../../shared/timeouts.mjs';
+import { fieldOf } from '../../../shared/values.mjs';
+import { browserJobRejectionDetails } from '../../../transport/failures/rejection.mjs';
+import { failureDetails } from '../../../transport/failures/vocabulary.mjs';
 import { executeSellerReviewsJob } from '../../application/export-reviews.mjs';
 import { contract } from '../../contract/reviews.contract.mjs';
 // The authorization lease is built by this process; a wrong shape is an e-Comet defect, not the seller's.
@@ -20,7 +21,7 @@ const errorDetails = (error) => {
  * workbook exists, export every signed report through the seller operations bound to the lease, and answer the
  * workbooks as resource links; the lease's release restores the seller's organization, and its failure keeps the report.
  */
-export const createReviewsTool = ({ answer, authorization, sellerOperations, artifacts, withDownloadedUpdate, reportOutputDirectory }) => ({
+export const createReviewsTool = ({ answer, authorization, sellerOperations, artifacts, withDownloadedUpdate, reportOutputDirectory, }) => ({
     needsBridge: true,
     // Parse boundary: the call's arguments, checked against the contract first.
     run: async (id, args = {}) => {
@@ -30,7 +31,7 @@ export const createReviewsTool = ({ answer, authorization, sellerOperations, art
             answer(id, textResult(toolFailure(new ToolExecutionError('INVALID_TOOL_ARGUMENTS', invalidArgumentsMessage(toolName, validation), 'arguments', false)), true));
             return;
         }
-        const triggerUrl = args.triggerUrl;
+        const triggerUrl = fieldOf(args, 'triggerUrl');
         if (typeof triggerUrl !== 'string' || !triggerUrl) {
             answer(id, textResult(toolFailure(missingHandoff()), true));
             return;
@@ -45,13 +46,14 @@ export const createReviewsTool = ({ answer, authorization, sellerOperations, art
             artifacts.requireTarget();
             authorizationLease = await authorization.authorize(triggerUrl);
             const grant = authorizationLease?.authorization;
+            const grantJobType = fieldOf(grant, 'jobType');
             if (!grant ||
-                typeof grant.authorizationId !== 'string' ||
-                grant.jobType !== 'seller_reviews' ||
-                !grant.job ||
-                typeof authorizationLease.release !== 'function') {
-                if (grant?.jobType && grant.jobType !== 'seller_reviews') {
-                    throw new ToolExecutionError('BROWSER_JOB_TYPE_MISMATCH', `Signed ${grant.jobType} job cannot be executed as ${toolName}.`, 'authorization', false);
+                typeof fieldOf(grant, 'authorizationId') !== 'string' ||
+                grantJobType !== 'seller_reviews' ||
+                !fieldOf(grant, 'job') ||
+                !authorizationLease) {
+                if (grantJobType && grantJobType !== 'seller_reviews') {
+                    throw new ToolExecutionError('BROWSER_JOB_TYPE_MISMATCH', `Signed ${grantJobType} job cannot be executed as ${toolName}.`, 'authorization', false);
                 }
                 throw leaseInvalid();
             }
@@ -69,10 +71,15 @@ export const createReviewsTool = ({ answer, authorization, sellerOperations, art
         }
         catch (caught) {
             const error = await withDownloadedUpdate(caught);
-            terminalResult = textResult({ ...toolFailure(error, {
-                    code: 'SELLER_REVIEWS_EXPORT_FAILED', message: 'The authorized seller review export could not be completed.',
-                    stage: 'execution', retryable: false,
-                }), ...errorDetails(error) }, true);
+            terminalResult = textResult({
+                ...toolFailure(error, {
+                    code: 'SELLER_REVIEWS_EXPORT_FAILED',
+                    message: 'The authorized seller review export could not be completed.',
+                    stage: 'execution',
+                    retryable: false,
+                }),
+                ...errorDetails(error),
+            }, true);
         }
         try {
             await authorizationLease?.release?.();

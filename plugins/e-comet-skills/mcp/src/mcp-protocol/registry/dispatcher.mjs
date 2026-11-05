@@ -1,20 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import { answerRunResult, callWithHandoff, createRunRegistry, RUN_RESULT_RETENTION_MS, RUN_WAIT_MS } from './runs.mjs';
 import { mcpError, mcpResult } from '../framing.mjs';
-import { textResult, toolFailure } from '../results/serialize.mjs';
-import { invalidArgumentsMessage, validateArguments } from './validate.mjs';
-import { OZON_EXTENSION_OUTDATED_REASON } from '../../transport/failures/vocabulary.mjs';
-import { PENDING_UPDATE_VERSION_PATTERN } from '../../transport/extension/wire.mjs';
-import { ToolExecutionError } from '../../shared/coded-error.mjs';
-import { createRouter } from './router.mjs';
-import { createOperationDiagnostics, withReceipt } from '../results/receipts.mjs';
 import { describeToolContract } from '../generic-tools.mjs';
+import { createRouter } from './router.mjs';
+import { answerRunResult, callWithHandoff, createRunRegistry, RUN_RESULT_RETENTION_MS, RUN_WAIT_MS, } from './runs.mjs';
+import { invalidArgumentsMessage, validateArguments } from './validate.mjs';
+import { createOperationDiagnostics, withReceipt } from '../results/receipts.mjs';
+import { textResult, toolFailure } from '../results/serialize.mjs';
+import { ToolExecutionError } from '../../shared/coded-error.mjs';
+import { isRecord } from '../../shared/values.mjs';
+import { PENDING_UPDATE_VERSION_PATTERN } from '../../transport/extension/wire.mjs';
+import { OZON_EXTENSION_OUTDATED_REASON } from '../../transport/failures/vocabulary.mjs';
 // A capability the connected extension lacks while a downloaded update waits: the store cannot help, a restart can.
-// Accepted residual "The downloaded-update step does not compare versions": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "The downloaded-update step does not compare versions": docs/architecture/residuals/signed-flow.md.
 const withPendingUpdate = (error, pendingUpdateVersion) => {
     const end = error.message.indexOf('. ');
-    error.message = `${end < 0 ? error.message : error.message.slice(0, end + 1)} The extension update ${pendingUpdateVersion} is already ` +
-        'downloaded: ask the user to restart the browser, or apply the update on app.e-comet.io, then request a new browser job and retry.';
+    error.message =
+        `${end < 0 ? error.message : error.message.slice(0, end + 1)} The extension update ${pendingUpdateVersion} is already ` +
+            'downloaded: ask the user to restart the browser, or apply the update on app.e-comet.io, then request a new browser job and retry.';
     return error;
 };
 // A failing call waits at most this long for the snapshot that may name a downloaded update.
@@ -36,19 +38,23 @@ version = undefined,
 // downloaded-update reading of a failure.
 registerTools = (_registry) => [], }) => {
     const validateToolArguments = (name, args) => validateArguments(contracts.find((contract) => contract.name === name)?.inputSchema, args);
-    const currentBridgeStatus = () => getBridgeStatus({ clientInfo: router.session.clientInfo,
-        protocolVersion: router.session.protocolVersion, clientObservedAt: router.session.observedAt });
+    const currentBridgeStatus = () => getBridgeStatus({
+        clientInfo: router.session.clientInfo,
+        protocolVersion: router.session.protocolVersion,
+        clientObservedAt: router.session.observedAt,
+    });
     const operationDiagnostics = createOperationDiagnostics({ now, randomUUID: createUuid });
     // A capability the extension lacks while its update is downloaded: the version 2 snapshot names that update. A caller
     // that attests a missing capability itself (an Ozon package tool) says so in `attested`.
     const withDownloadedUpdate = async (error, attested = false) => {
-        const missingCapability = error instanceof ToolExecutionError && (error.code === 'EXTENSION_UPDATE_REQUIRED' ||
-            attested || error.details?.reason === OZON_EXTENSION_OUTDATED_REASON);
+        const missingCapability = error instanceof ToolExecutionError &&
+            (error.code === 'EXTENSION_UPDATE_REQUIRED' || attested || error.details?.reason === OZON_EXTENSION_OUTDATED_REASON);
         // Only a version 2 snapshot can name the update; an older extension is not asked.
-        if (!missingCapability || !diagnosticSnapshotV2Ready() || typeof requestExtensionDiagnosticSnapshot !== 'function')
+        if (!missingCapability || !diagnosticSnapshotV2Ready() || requestExtensionDiagnosticSnapshot === undefined)
             return error;
         try {
-            const version = (await requestExtensionDiagnosticSnapshot(PENDING_UPDATE_SNAPSHOT_TIMEOUT_MS))?.pendingUpdateVersion;
+            const snapshot = await requestExtensionDiagnosticSnapshot(PENDING_UPDATE_SNAPSHOT_TIMEOUT_MS);
+            const version = isRecord(snapshot) ? snapshot.pendingUpdateVersion : undefined;
             return typeof version === 'string' && PENDING_UPDATE_VERSION_PATTERN.test(version) ? withPendingUpdate(error, version) : error;
         }
         catch {
@@ -75,14 +81,17 @@ registerTools = (_registry) => [], }) => {
         [
             'describe_e_comet_tool',
             // Parse boundary: the arguments, checked against the contract first.
-            { needsBridge: false, run: async (id, args) => {
+            {
+                needsBridge: false,
+                run: async (id, args) => {
                     const validation = validateToolArguments('describe_e_comet_tool', args);
                     if (!validation.ok) {
                         sendOperationResult(id, 'describe_e_comet_tool', textResult(toolFailure(new ToolExecutionError('INVALID_TOOL_ARGUMENTS', invalidArgumentsMessage('describe_e_comet_tool', validation), 'arguments', false)), true));
                         return;
                     }
-                    sendOperationResult(id, 'describe_e_comet_tool', textResult(describeToolContract(contracts, args.name)));
-                } },
+                    sendOperationResult(id, 'describe_e_comet_tool', textResult(describeToolContract(contracts, isRecord(args) ? args.name : undefined)));
+                },
+            },
         ],
         [
             'e_comet_run_result',
@@ -101,6 +110,8 @@ registerTools = (_registry) => [], }) => {
         call: async (name, args, { id }) => {
             // The router calls only a listed tool, and every listed tool has its handler.
             const tool = toolHandlers.get(name);
+            if (!tool)
+                throw new TypeError(`No handler for the listed tool ${name}.`);
             if (!tool.needsBridge) {
                 await tool.run(id, args);
                 return;

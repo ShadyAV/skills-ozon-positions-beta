@@ -1,13 +1,15 @@
+import { toolErrorSchema, withOperationDiagnostic } from '../../transport/mcp/results.mjs';
 import { array, boolean, nonNegativeInteger, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
 import { liveAggregateSchemas, status, storageWarnings } from './live.mjs';
-import { DEFAULT_IMAGE_PHOTOS, MAX_IMAGE_ARTICLES, MAX_IMAGE_BASKET, MAX_IMAGE_PHOTOS } from '../domain/constants/limits.const.mjs';
-import { toolErrorSchema, withOperationDiagnostic } from '../../transport/mcp/results.mjs';
+import { DEFAULT_IMAGE_PHOTOS, MAX_IMAGE_ARTICLES, MAX_IMAGE_BASKET, MAX_IMAGE_PHOTOS, } from '../domain/constants/limits.const.mjs';
 const imageProductSchema = object({
     nmId: positiveInteger,
     status: { type: 'string', enum: ['ok', 'not_found', 'partial', 'failed', 'skipped'] },
     error: object({
         code: { enum: ['WB_IMAGE_RATE_LIMITED', 'WB_IMAGE_PROBE_FAILED'] },
-        message: string, stage: { const: 'images' }, retryable: { const: false },
+        message: string,
+        stage: { const: 'images' },
+        retryable: { const: false },
     }, ['code', 'message', 'stage', 'retryable']),
     basket: positiveInteger,
     baseUrl: string,

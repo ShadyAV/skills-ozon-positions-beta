@@ -17,12 +17,13 @@ export const encodeFrame = (message) => {
     header.writeUInt32LE(body.length, 0);
     return Buffer.concat([header, body]);
 };
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const frameError = (code, message) => Object.assign(new Error(message), { code });
 /**
  * `maxBytes` bounds the body length declared by the header. The error is reported once and the reader then ignores input.
  * Parse boundary: a frame is any JSON object a peer wrote; its readers check it field by field.
  */
-export const createFrameReader = ({ maxBytes, onFrame, onError }) => {
+export const createFrameReader = ({ maxBytes, onFrame, onError, }) => {
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
         throw new TypeError('maxBytes must be a positive safe integer');
     let chunks = [];
@@ -39,7 +40,7 @@ export const createFrameReader = ({ maxBytes, onFrame, onError }) => {
     const parse = (body) => {
         try {
             const message = JSON.parse(utf8.decode(body));
-            if (message !== null && typeof message === 'object' && !Array.isArray(message))
+            if (isObject(message))
                 return message;
         }
         catch {
@@ -60,7 +61,7 @@ export const createFrameReader = ({ maxBytes, onFrame, onError }) => {
             if (buffered < needed)
                 return;
             // One concatenation per push that can make progress, then frames are read from it by offset.
-            const data = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+            const data = chunks.length === 1 && chunks[0] ? chunks[0] : Buffer.concat(chunks);
             let offset = 0;
             // Reset first: an onFrame that throws leaves the loop without setting it for the kept tail.
             needed = HEADER_BYTES;

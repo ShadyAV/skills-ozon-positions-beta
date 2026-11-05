@@ -8,6 +8,7 @@ import * as fsPromises from 'node:fs/promises';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { EXTENSION_LOG_LIMITS } from '../limits.mjs';
+import { isRecord } from '../../shared/values.mjs';
 // --- CRC32C (Castagnoli), as LevelDB masks it ---
 const CRC_TABLE = new Uint32Array(256).map((_, n) => {
     let crc = n;
@@ -17,8 +18,9 @@ const CRC_TABLE = new Uint32Array(256).map((_, n) => {
 });
 export const crc32c = (buf) => {
     let crc = 0xffffffff;
+    // Both indexes are in range: `i` is below the length and the table has 256 entries.
     for (let i = 0; i < buf.length; i++)
-        crc = CRC_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+        crc = (CRC_TABLE[(crc ^ (buf[i] ?? 0)) & 0xff] ?? 0) ^ (crc >>> 8);
     return (crc ^ 0xffffffff) >>> 0;
 };
 const unmaskCrc = (masked) => {
@@ -33,7 +35,7 @@ const readVarint = (buf, start) => {
     for (let i = 0; i < 5; i++) {
         if (pos >= buf.length)
             throw new RangeError('varint past the end');
-        const byte = buf[pos++];
+        const byte = buf[pos++] ?? 0;
         value += (byte & 0x7f) * scale;
         if (byte < 0x80) {
             if (value > 0xffffffff)
@@ -54,7 +56,7 @@ export const decompressSnappy = (src) => {
     let pos = start;
     let o = 0;
     while (pos < src.length) {
-        const tag = src[pos++];
+        const tag = src[pos++] ?? 0;
         const kind = tag & 3;
         if (kind === 0) {
             let len = tag >>> 2;
@@ -64,7 +66,7 @@ export const decompressSnappy = (src) => {
                     throw new RangeError('snappy literal length past the end');
                 len = 0;
                 for (let i = 0; i < bytes; i++)
-                    len += src[pos++] * 2 ** (8 * i);
+                    len += (src[pos++] ?? 0) * 2 ** (8 * i);
             }
             len += 1;
             if (pos + len > src.length || o + len > length)
@@ -80,7 +82,7 @@ export const decompressSnappy = (src) => {
                 if (pos + 1 > src.length)
                     throw new RangeError('snappy copy past the end');
                 len = ((tag >>> 2) & 7) + 4;
-                offset = ((tag >>> 5) << 8) | src[pos++];
+                offset = ((tag >>> 5) << 8) | (src[pos++] ?? 0);
             }
             else if (kind === 2) {
                 len = (tag >>> 2) + 1;
@@ -96,7 +98,7 @@ export const decompressSnappy = (src) => {
                 throw new RangeError('snappy copy out of range');
             // Byte by byte on purpose: a copy may overlap its own output.
             for (let i = 0; i < len; i++, o++)
-                out[o] = out[o - offset];
+                out[o] = out[o - offset] ?? 0;
         }
     }
     if (o !== length)
@@ -271,7 +273,11 @@ const readTable = (buf, offer) => {
     });
 };
 // Parse boundary: anything a file call threw.
-const systemCodeOf = (error) => typeof error?.code === 'string' && /^E[A-Z0-9]{2,15}$/.test(error.code) ? { systemCode: error.code } : {};
+const errorCode = (error) => (isRecord(error) ? error.code : undefined);
+const systemCodeOf = (error) => {
+    const code = errorCode(error);
+    return typeof code === 'string' && /^E[A-Z0-9]{2,15}$/.test(code) ? { systemCode: code } : {};
+};
 // File numbers grow with age, so the newest files come first; the total limit then drops the oldest.
 const fileNumber = (name) => Number.parseInt(name, 10) || 0;
 /**
@@ -291,13 +297,16 @@ export const readLevelDbValues = async ({ dir, keys, fileSystem = fsPromises, ma
         names = await fileSystem.readdir(dir);
     }
     catch (error) {
-        return every(error?.code === 'ENOENT' ? { state: 'absent', skippedRecords: 0 } : { state: 'unreadable', ...systemCodeOf(error), skippedRecords: 0 });
+        return every(errorCode(error) === 'ENOENT'
+            ? { state: 'absent', skippedRecords: 0 }
+            : { state: 'unreadable', ...systemCodeOf(error), skippedRecords: 0 });
     }
     const wanted = keys.map((key) => Buffer.from(key, 'utf8'));
     const newest = keys.map(() => undefined);
     const offer = (userKey, sequence, value, source) => {
         const index = wanted.findIndex((key) => userKey.equals(key));
-        if (index >= 0 && (newest[index] === undefined || sequence > newest[index].sequence))
+        const held = newest[index];
+        if (index >= 0 && (held === undefined || sequence > held.sequence))
             newest[index] = { sequence, value, source };
     };
     let skippedRecords = 0;
@@ -311,7 +320,9 @@ export const readLevelDbValues = async ({ dir, keys, fileSystem = fsPromises, ma
     for (const name of dataFiles) {
         if (clock() > deadline)
             return every({ state: 'truncated', skippedRecords });
-        const unused = () => { anyUnused = true; };
+        const unused = () => {
+            anyUnused = true;
+        };
         let buf;
         try {
             const { size } = await fileSystem.stat(join(dir, name));
@@ -324,7 +335,7 @@ export const readLevelDbValues = async ({ dir, keys, fileSystem = fsPromises, ma
         }
         catch (error) {
             // A vanished file leaves a key no other file holds absent, not unreadable.
-            if (error?.code !== 'ENOENT')
+            if (errorCode(error) !== 'ENOENT')
                 unreadable ??= systemCodeOf(error);
             unused();
             continue;
@@ -343,7 +354,13 @@ export const readLevelDbValues = async ({ dir, keys, fileSystem = fsPromises, ma
     }
     const stateOf = (found) => {
         if (found === undefined) {
-            const state = unreadable ? 'unreadable' : unparsed ? 'format_unknown' : overLimit ? 'truncated' : 'absent';
+            const state = unreadable
+                ? 'unreadable'
+                : unparsed
+                    ? 'format_unknown'
+                    : overLimit
+                        ? 'truncated'
+                        : 'absent';
             return { state, ...unreadable, skippedRecords };
         }
         // Any unused file, even one that gave this version before it failed part-way, may hold a newer one.
@@ -357,4 +374,6 @@ export const readLevelDbValues = async ({ dir, keys, fileSystem = fsPromises, ma
     return Object.fromEntries(keys.map((key, index) => [key, stateOf(newest[index])]));
 };
 /** The newest version of `key` in `dir`: `readLevelDbValues` for one key. */
-export const readLevelDbValue = async ({ key, ...options }) => (await readLevelDbValues({ ...options, keys: [key] }))[key];
+export const readLevelDbValue = async ({ key, ...options }) => 
+// Every key read has its result; the fallback is never taken.
+(await readLevelDbValues({ ...options, keys: [key] }))[key] ?? { state: 'absent', skippedRecords: 0 };

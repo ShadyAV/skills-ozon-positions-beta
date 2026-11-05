@@ -2,17 +2,20 @@
 // client's discovery handler, so kick(), the background re-list and a tool call share one connect attempt and a second
 // session can never replace a live one. Without a session it keeps what it last observed, so status() and a tool call
 // can name why no broker answers (spec §5.7, §5.8).
+import { createTransportEvents } from '../broker/events.mjs';
+import { bridgeFrameRefusal, extensionDisconnectedError } from '../broker/messages.mjs';
 import { chooseBridgeCause, chosenBrowser, shouldWaitForBroker } from '../cause.mjs';
+import { isOneOf, isRecord } from '../../shared/values.mjs';
 import { bridgeOwner } from '../../transport/diagnostics/bridge-codes.mjs';
 import { EXTENSION_INSTALL_VOCABULARY } from '../../transport/diagnostics/facts.mjs';
-import { bridgeFrameRefusal, extensionDisconnectedError } from '../broker/messages.mjs';
-import { createTransportEvents } from '../broker/events.mjs';
-const iso = (ms) => (Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : null);
+const iso = (ms) => (typeof ms === 'number' && Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : null);
 const text = (value) => (typeof value === 'string' && value.length > 0 ? value : undefined);
 // A failed step and its system code as one identifier, `ManifestWrite_EPERM`: step names carry no underscore.
 const stepCode = (name, code) => [text(name), text(code)].filter(Boolean).join('_').slice(0, 64);
 // Frames the broker writes itself: they say nothing about whether the extension still answers.
 const BROKER_FRAMES = new Set(['session_end', 'broker_refusal']);
+const errorCode = (error) => (isRecord(error) ? error.code : undefined);
+const errorMessage = (error) => (isRecord(error) ? error.message : undefined);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const REFRESH_INTERVAL_MS = 30_000;
 const WAIT_MS = 30_000;
@@ -24,7 +27,9 @@ const publicRegistration = (result) => result && {
     manifestWrittenAt: iso(result.manifestWrittenAtMs),
     verifiedSinceAt: iso(result.verifiedSinceMs),
     runtimeRecheck: result.runtimeRecheck ?? 'not_run',
-    error: result.error ? { name: String(result.error.name), code: typeof result.error.code === 'string' ? result.error.code : null } : null,
+    error: result.error
+        ? { name: String(result.error.name), code: typeof result.error.code === 'string' ? result.error.code : null }
+        : null,
 };
 /**
  * `registration` both ensures and repairs: one idempotent pass, where `repair` also rewrites the Windows key.
@@ -34,7 +39,7 @@ const publicRegistration = (result) => result && {
  * in the background or for status. `transportEvents` keeps what
  * otherwise reaches only stderr; server.mjs shares it with the request broker for late answers.
  */
-export function createBridgeClientRuntime({ brokerClient, registration, extensionProtocol, connections, log, env = process.env, platform = process.platform, platformCause = null, readPolicy = async () => null, probe = async () => null, now = Date.now, readExtensionLog = async () => null, comspec = () => 'not_applicable', transportEvents = createTransportEvents({ now }) }) {
+export function createBridgeClientRuntime({ brokerClient, registration, extensionProtocol, connections, log, env = process.env, platform = process.platform, platformCause = null, readPolicy = async () => null, probe = async () => null, now = Date.now, readExtensionLog = async () => null, comspec = () => 'not_applicable', transportEvents = createTransportEvents({ now }), }) {
     // A spawned test server must never dial the developer's real broker: under test only an injected state directory,
     // and with it a test rendezvous, lets it look.
     const discoveryAllowed = env.NODE_ENV !== 'test' || Boolean(env.ECOMET_TEST_STATE_DIR?.trim());
@@ -73,7 +78,9 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 refreshAgain = false;
                 try {
                     const entries = await brokerClient.listEntries();
-                    const records = await brokerClient.listFailureRecords({ manifestWrittenAtMs: registrationResult?.manifestWrittenAtMs ?? null });
+                    const records = await brokerClient.listFailureRecords({
+                        manifestWrittenAtMs: registrationResult?.manifestWrittenAtMs ?? null,
+                    });
                     // Assigned together, so a status read between the two reads never pairs new brokers with an old record.
                     brokers = entries;
                     lastFailureRecord = records.find((record) => text(record.name) && iso(record.at)) ?? null;
@@ -86,10 +93,12 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                     }
                 }
                 catch (error) {
-                    log(`e-comet bridge: broker list not read (${error?.code ?? 'unknown'})`);
+                    log(`e-comet bridge: broker list not read (${String(errorCode(error) ?? 'unknown')})`);
                 }
             } while (refreshAgain && !closed);
-        })().finally(() => { refreshing = null; });
+        })().finally(() => {
+            refreshing = null;
+        });
         return refreshing;
     };
     // `repair` is a tool call that found no broker: it rewrites what an ordinary start trusts from its last check.
@@ -97,36 +106,41 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
         try {
             registrationResult = await registration(options);
             if (registrationResult?.error)
-                transportEvents.add({ kind: 'registration_step_failed', code: stepCode(registrationResult.error.name, registrationResult.error.code) });
+                transportEvents.add({
+                    kind: 'registration_step_failed',
+                    code: stepCode(registrationResult.error.name, registrationResult.error.code),
+                });
         }
         catch (error) {
-            log(`e-comet registration failed (${error?.code ?? 'unknown'})`);
-            transportEvents.add({ kind: 'registration_step_failed', code: text(error?.code) ?? 'unknown' });
+            log(`e-comet registration failed (${String(errorCode(error) ?? 'unknown')})`);
+            transportEvents.add({ kind: 'registration_step_failed', code: text(errorCode(error)) ?? 'unknown' });
         }
     };
     // Calls that find no broker while a repair runs await it: a second pass's PowerShell would find the key this one
     // restored and answer from the older time it read. Accepted residual "Two processes each run a repair":
-    // docs/local-agent-architecture.md#accepted-residuals.
+    // docs/architecture/residuals/native-bridge.md.
     let repairing = null;
-    const repair = () => (repairing ??= runRegistration({ repair: true }).finally(() => { repairing = null; }));
+    const repair = () => (repairing ??= runRegistration({ repair: true }).finally(() => {
+        repairing = null;
+    }));
     // The policy and the profile probe. macOS 27 guards the profile folders, so there the background skips the probe and
     // only a tool call or an explicitly selected diagnosis probe reads it. The policy is read at start, on a tool call
     // and in a diagnosis, never in the background: on Windows it is eight hidden reg.exe processes for a value only a managed policy changes.
-    // Accepted residual "Stale user-level-hosts policy between reads": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Stale user-level-hosts policy between reads": docs/architecture/residuals/native-bridge.md.
     const readDevice = async ({ withPolicy = true, withProbe }) => {
         const read = async (reader, what) => {
             try {
                 return await reader();
             }
             catch (error) {
-                log(`e-comet bridge: ${what} not read (${error?.code ?? 'unknown'})`);
+                log(`e-comet bridge: ${what} not read (${String(errorCode(error) ?? 'unknown')})`);
                 return null;
             }
         };
         // Only what this pass read is written: a slow background pass must not put back a value a tool call or a
         // diagnosis replaced meanwhile.
         const [nextPolicy, nextProbe] = await Promise.all([withPolicy && read(readPolicy, 'policy'), withProbe && read(probe, 'probe')]);
-        if (withPolicy)
+        if (nextPolicy !== false)
             policy = nextPolicy;
         if (withProbe)
             probeResult = nextProbe;
@@ -141,21 +155,31 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
             transportEvents.add({ kind: 'connect_failed', code: text(outcome.code) ?? text(outcome.reason) ?? 'unknown' });
         return outcome;
     }, (error) => {
-        if (error?.code !== 'BROKER_CLIENT_STOPPED') {
-            log(`e-comet bridge: connect failed (${error?.code ?? 'unknown'})`);
-            transportEvents.add({ kind: 'connect_failed', code: text(error?.code) ?? 'unknown' });
+        if (errorCode(error) !== 'BROKER_CLIENT_STOPPED') {
+            log(`e-comet bridge: connect failed (${String(errorCode(error) ?? 'unknown')})`);
+            transportEvents.add({ kind: 'connect_failed', code: text(errorCode(error)) ?? 'unknown' });
         }
         return { ok: false, reason: 'failed' };
     });
     const cause = () => chooseBridgeCause({
-        platformCause, registration: registrationResult, policy, probe: probeResult, entries: brokers,
-        failureRecords: lastFailureRecord ? [lastFailureRecord] : [], lastConnect, now: now(), extensionLog, comspec: comspecState,
+        platformCause,
+        registration: registrationResult,
+        policy,
+        probe: probeResult,
+        entries: brokers,
+        failureRecords: lastFailureRecord ? [lastFailureRecord] : [],
+        lastConnect,
+        now: now(),
+        extensionLog,
+        comspec: comspecState,
     });
     // Never throws: a throw here would orphan the session in the broker client.
     const onSession = (session) => {
         try {
-            if (closed)
-                return void session.close();
+            if (closed) {
+                session.close();
+                return;
+            }
             extensionProtocol.openSession(session, session.facts, session.browserContext);
             // The browser found the connector: what its log said before no longer explains anything.
             extensionLog = null;
@@ -167,9 +191,9 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                     routeLastObservedAtMs = now();
                 // Not awaited: one owner's slow stream write must not hold back another owner's reply. There is no
                 // receive window either: see "No client-side receive window over a broker session" in
-                // docs/local-agent-architecture.md#accepted-residuals.
-                void Promise.resolve(extensionProtocol.handleMessage(session, frame)).catch((error) => {
-                    log('extension message handling failed:', error?.message);
+                // docs/architecture/residuals/native-bridge.md.
+                Promise.resolve(extensionProtocol.handleMessage(session, frame)).catch((error) => {
+                    log('extension message handling failed:', errorMessage(error));
                     session.close();
                 });
             });
@@ -183,12 +207,12 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 // so after a browser quit it would name a permission step or a running browser that no longer exist.
                 probeResult = null;
                 extensionProtocol.onSessionEnd(session);
-                void refresh();
+                refresh();
             });
-            void refresh();
+            refresh();
         }
         catch (error) {
-            log('extension session could not open:', error?.message);
+            log('extension session could not open:', errorMessage(error));
             session.close();
             // The close handler may not be registered yet, and a half-opened session must not stay current over a
             // closed connection. Ending it twice is harmless: only the current session is ended.
@@ -196,14 +220,14 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 extensionProtocol.onSessionEnd(session);
             }
             catch (endError) {
-                log('extension session could not end:', endError?.message);
+                log('extension session could not end:', errorMessage(endError));
             }
         }
     };
     const kick = () => {
         if (!initialized || !discoveryAllowed || closed || connections.extensionSession)
             return;
-        void attempt().then(refresh);
+        attempt().then(refresh);
     };
     return {
         onInitialized() {
@@ -220,12 +244,14 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
             // stopped answering or left a failure record without waiting for a tool call.
             refreshTimer = setInterval(() => {
                 if (!connections.extensionReady)
-                    void Promise.all([attempt(), readDevice({ withPolicy: false, withProbe: platform !== 'darwin' })]).then(refresh);
+                    Promise.all([attempt(), readDevice({ withPolicy: false, withProbe: platform !== 'darwin' })]).then(refresh);
             }, REFRESH_INTERVAL_MS);
             refreshTimer.unref?.();
             // Discovery's first tick is in flight already; this joins it to learn when the first answer is in. Until the
             // registration, that attempt and the first device read are all in, status says connecting.
-            void Promise.all([registered, attempt(), readDevice({ withProbe: platform !== 'darwin' })]).then(refresh).finally(() => {
+            Promise.all([registered, attempt(), readDevice({ withProbe: platform !== 'darwin' })])
+                .then(refresh)
+                .finally(() => {
                 firstRefreshDone = true;
             });
         },
@@ -238,7 +264,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
          */
         extensionLogTarget() {
             const browser = connections.extensionSession?.facts?.browser;
-            return (EXTENSION_INSTALL_VOCABULARY.browsers.includes(browser) ? { browser } : { policy });
+            return isOneOf(EXTENSION_INSTALL_VOCABULARY.browsers, browser) ? { browser } : { policy };
         },
         /**
          * A diagnosis's fresh read of the extension's log, unreadable or not, is the newest account: it replaces the kept
@@ -297,7 +323,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 }
                 // The failure path only: the extension's own account of the connection, read once and kept for status,
                 // from the browser the cause names; with no such browser its evidence could name no cause.
-                // Accepted residual "A broker that fails before its own code runs": docs/local-agent-architecture.md#accepted-residuals.
+                // Accepted residual "A broker that fails before its own code runs": docs/architecture/residuals/native-bridge.md.
                 if (!connections.extensionReady && !closed) {
                     const browser = chosenBrowser({ probe: probeResult, policy });
                     let evidence = null;
@@ -305,7 +331,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                         evidence = browser === undefined ? null : await readExtensionLog({ browser });
                     }
                     catch (error) {
-                        log(`e-comet bridge: extension log not read (${error?.code ?? 'unknown'})`);
+                        log(`e-comet bridge: extension log not read (${String(errorCode(error) ?? 'unknown')})`);
                     }
                     // A session that opened during the read has already dropped the log; this older read must not return.
                     if (!connections.extensionReady) {
@@ -316,7 +342,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
             }
             await refresh();
             // Accepted residual "A broker that appears during the failure path reads as not visible":
-            // docs/local-agent-architecture.md#accepted-residuals.
+            // docs/architecture/residuals/native-bridge.md.
             return connections.extensionReady ? { ok: true } : { ok: false, ...cause() };
         },
         sendExtension(message) {
@@ -327,7 +353,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 session.send(message);
             }
             catch (error) {
-                if (error?.code === 'FRAME_TOO_LARGE')
+                if (errorCode(error) === 'FRAME_TOO_LARGE')
                     throw bridgeFrameRefusal('FRAME_TOO_LARGE');
                 throw error;
             }
@@ -337,6 +363,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
             const connected = connections.extensionReady === true;
             const starting = initialized && discoveryAllowed && !firstRefreshDone;
             const found = connected || starting || waiting > 0 ? null : cause();
+            const brokerProtocolVersion = session?.brokerProtocolVersion;
             return {
                 code: connected ? 'connected' : found ? found.code : 'connecting',
                 ...(found ? { owner: bridgeOwner(found.code, found.detail) } : {}),
@@ -349,36 +376,46 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
                 extensionLastDisconnectedAtMs: connections.extensionLastDisconnectedAtMs,
                 ...(connections.extensionVersion === undefined ? {} : { extensionVersion: connections.extensionVersion }),
                 // Known only while the extension that announces them is connected.
-                ...(connected ? {
-                    ozonSellerPromotionReportSupported: connections.extensionOzonPromotionReady === true,
-                    ozonSellerPromotionReportsSupported: connections.extensionOzonPromotionPackageReady === true,
-                    ozonSellerAnalyticsReportSupported: connections.extensionOzonAnalyticsReady === true,
-                    ozonSearchPositionsSupported: connections.extensionOzonSearchPositionsReady === true,
-                } : {}),
+                ...(connected
+                    ? {
+                        ozonSellerPromotionReportSupported: connections.extensionOzonPromotionReady === true,
+                        ozonSellerPromotionReportsSupported: connections.extensionOzonPromotionPackageReady === true,
+                        ozonSellerAnalyticsReportSupported: connections.extensionOzonAnalyticsReady === true,
+                        ozonSearchPositionsSupported: connections.extensionOzonSearchPositionsReady === true,
+                    }
+                    : {}),
                 registration: publicRegistration(registrationResult),
                 // A failed read is listed apart, so each entry keeps its closed shape and a null there is not "no policy".
                 userLevelHosts: Array.isArray(policy) ? policy.map(({ readFailed, ...entry }) => entry) : [],
-                policyReadFailed: Array.isArray(policy) ? policy.filter((entry) => entry.readFailed === true).map((entry) => entry.browser) : [],
+                policyReadFailed: Array.isArray(policy)
+                    ? policy.filter((entry) => entry.readFailed === true).map((entry) => entry.browser)
+                    : [],
                 extensionInstall: probeResult ?? null,
                 brokers: brokers.flatMap((entry) => {
                     const startedAt = iso(entry.startedAt);
-                    if (!Number.isSafeInteger(entry.pid) || entry.pid < 1 || !text(entry.browser) || !text(entry.brokerVersion) || !startedAt)
+                    if (!Number.isSafeInteger(entry.pid) ||
+                        entry.pid < 1 ||
+                        !text(entry.browser) ||
+                        !text(entry.brokerVersion) ||
+                        !startedAt)
                         return [];
-                    return [{
+                    return [
+                        {
                             pid: entry.pid,
                             browser: entry.browser,
                             ...(text(entry.extensionVersion) ? { extensionVersion: entry.extensionVersion } : {}),
                             brokerVersion: entry.brokerVersion,
                             startedAt,
                             current: session?.pid === entry.pid,
-                        }];
+                        },
+                    ];
                 }),
                 lastFailureRecord: lastFailureRecord && {
                     name: lastFailureRecord.name,
                     code: typeof lastFailureRecord.code === 'string' ? lastFailureRecord.code : null,
                     at: iso(lastFailureRecord.at),
                 },
-                brokerProtocolVersion: Number.isSafeInteger(session?.brokerProtocolVersion) ? session.brokerProtocolVersion : null,
+                brokerProtocolVersion: Number.isSafeInteger(brokerProtocolVersion) ? brokerProtocolVersion : null,
                 brokerVersion: text(session?.brokerVersion) ?? null,
                 routeLastObservedAtMs,
                 transportEvents: transportEvents.list(),
@@ -389,7 +426,7 @@ export function createBridgeClientRuntime({ brokerClient, registration, extensio
             if (closed)
                 return;
             closed = true;
-            clearInterval(refreshTimer);
+            clearInterval(refreshTimer ?? undefined);
             brokerClient.stop();
         },
     };

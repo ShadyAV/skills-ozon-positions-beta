@@ -1,19 +1,21 @@
-import { resourceLinkResult, textResult } from '../../../../mcp-protocol/results/serialize.mjs';
 import { validateArguments } from '../../../../mcp-protocol/registry/validate.mjs';
-import { withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
+import { resourceLinkResult, textResult } from '../../../../mcp-protocol/results/serialize.mjs';
+import { isRecord } from '../../../../shared/values.mjs';
 import { contract } from '../../contract/prepare.contract.mjs';
 import { FeedbackPreparationError, feedbackPreparationFailure } from '../../domain/converters/errors.converter.mjs';
+import { withFeedbackOperation } from '../../../../transport/failures/evidence.mjs';
 const failureResult = (error) => {
     const failure = feedbackPreparationFailure(error);
     console.error('[McpDispatcher] Feedback preparation failed:', JSON.stringify(failure.error));
     return textResult(failure, true);
 };
 // prepare_e_comet_feedback: `prepare` answers the preparation's outcome for the call's arguments.
-export const createPrepareTool = ({ answer, prepare }) => ({
+export const createPrepareTool = ({ answer, prepare, }) => ({
     needsBridge: false,
     // Parse boundary: the call's arguments, checked against the contract first.
     run: async (id, args = {}) => {
-        if (!validateArguments(contract.inputSchema, args).ok) {
+        // The contract admits only an object.
+        if (!validateArguments(contract.inputSchema, args).ok || !isRecord(args)) {
             answer(id, failureResult(new FeedbackPreparationError('FEEDBACK_INPUT_INVALID')));
             return;
         }

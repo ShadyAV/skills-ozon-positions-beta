@@ -1,41 +1,57 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, chmod, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
-import { createServer } from 'node:http';
+import { isRecord } from '../../../plugins/e-comet-skills/mcp/src/shared/values.mjs';
 import { RETRY_POLICIES, retryTransientFileOperation } from '../../../plugins/e-comet-skills/mcp/src/storage/files/transient-retry.mjs';
+// Any object reads as a store: only this process writes the file, and its fields keep the shapes it wrote.
+const isCredentials = (value) => isRecord(value);
 export const REMOTE_URL = 'https://mcp.e-comet.io/mcp';
 export const OAUTH_ISSUER_ORIGIN = 'https://auth.mcp.e-comet.io';
 export const CREDENTIAL_DIRECTORY = join(homedir(), '.e-comet-deepseek-harness', 'account');
 export class LoginRequiredError extends Error {
-    constructor() { super('e-Comet login required. Open Plugins → e-Comet Skills in DeepSeek and connect your account.'); this.name = 'LoginRequiredError'; }
+    constructor() {
+        super('e-Comet login required. Open Plugins → e-Comet Skills in DeepSeek and connect your account.');
+        this.name = 'LoginRequiredError';
+    }
 }
 /** SDK OAuthClientProvider. Credentials are never returned as MCP content. */
 export class FileOAuthProvider {
     #savingStopped = false;
     #writes = new Set();
-    constructor({ directory = CREDENTIAL_DIRECTORY, redirectUrl, onAuthorization } = {}) {
+    constructor({ directory = CREDENTIAL_DIRECTORY, redirectUrl, onAuthorization, } = {}) {
         this.directory = directory;
         this.file = join(directory, 'credentials.json');
         this.callbackUrl = redirectUrl;
         this.onAuthorization = onAuthorization;
         this.oauthState = randomBytes(32).toString('hex');
     }
-    get redirectUrl() { return this.callbackUrl ?? 'http://127.0.0.1/callback'; }
-    get clientMetadata() {
-        return { client_name: 'e-Comet DeepSeek Harness', redirect_uris: [this.redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'client_secret_post' };
+    get redirectUrl() {
+        return this.callbackUrl ?? 'http://127.0.0.1/callback';
     }
-    state() { return this.oauthState; }
+    get clientMetadata() {
+        return {
+            client_name: 'e-Comet DeepSeek Harness',
+            redirect_uris: [this.redirectUrl],
+            grant_types: ['authorization_code', 'refresh_token'],
+            response_types: ['code'],
+            token_endpoint_auth_method: 'client_secret_post',
+        };
+    }
+    state() {
+        return this.oauthState;
+    }
     async read() {
         try {
             const state = JSON.parse(await readFile(this.file, 'utf8'));
-            return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+            return isCredentials(state) ? state : {};
         }
         catch (error) {
-            if (error.code === 'ENOENT' || error instanceof SyntaxError)
+            if ((isRecord(error) && error.code === 'ENOENT') || error instanceof SyntaxError)
                 return {};
             // Other failures keep automatic reconnection: "Native DeepSeek unreadable credential store"
-            // in docs/local-agent-architecture.md#accepted-residuals.
+            // in docs/architecture/residuals/deepseek.md.
             throw new Error('Cannot read e-Comet login state. Check access to the credentials directory.', { cause: error });
         }
     }
@@ -49,7 +65,7 @@ export class FileOAuthProvider {
             return Promise.resolve();
         const writing = this.#write(patch);
         this.#writes.add(writing);
-        void writing.then(() => this.#writes.delete(writing), () => this.#writes.delete(writing));
+        writing.then(() => this.#writes.delete(writing), () => this.#writes.delete(writing));
         return writing;
     }
     async #write(patch) {
@@ -57,23 +73,37 @@ export class FileOAuthProvider {
         await chmod(this.directory, 0o700);
         const temporary = join(this.directory, `credentials-${randomBytes(8).toString('hex')}.tmp`);
         try {
-            await writeFile(temporary, JSON.stringify({ ...await this.read(), ...patch }), { mode: 0o600, flag: 'wx' });
+            await writeFile(temporary, JSON.stringify({ ...(await this.read()), ...patch }), { mode: 0o600, flag: 'wx' });
             await retryTransientFileOperation(() => rename(temporary, this.file), RETRY_POLICIES.FEEDBACK);
             await chmod(this.file, 0o600);
         }
         finally {
             // Preserve the publication error and other profiles' active files; see
-            // docs/local-agent-architecture.md#accepted-residuals for permanent refusal and refresh races.
+            // docs/architecture/residuals/deepseek.md for permanent refusal and refresh races.
             await retryTransientFileOperation(() => rm(temporary, { force: true }), RETRY_POLICIES.FEEDBACK).catch(() => { });
         }
     }
-    async tokens() { return (await this.read()).tokens; }
-    async saveTokens(tokens) { await this.update({ tokens }); }
-    async clientInformation() { return (await this.read()).clientInformation; }
-    async saveClientInformation(clientInformation) { await this.update({ clientInformation, redirectUrl: this.redirectUrl }); }
-    async saveCodeVerifier(codeVerifier) { await this.update({ codeVerifier }); }
-    async codeVerifier() { const verifier = (await this.read()).codeVerifier; if (!verifier)
-        throw new LoginRequiredError(); return verifier; }
+    async tokens() {
+        return (await this.read()).tokens;
+    }
+    async saveTokens(tokens) {
+        await this.update({ tokens });
+    }
+    async clientInformation() {
+        return (await this.read()).clientInformation;
+    }
+    async saveClientInformation(clientInformation) {
+        await this.update({ clientInformation, redirectUrl: this.redirectUrl });
+    }
+    async saveCodeVerifier(codeVerifier) {
+        await this.update({ codeVerifier });
+    }
+    async codeVerifier() {
+        const verifier = (await this.read()).codeVerifier;
+        if (!verifier)
+            throw new LoginRequiredError();
+        return verifier;
+    }
     async redirectToAuthorization(url) {
         if (!this.onAuthorization) {
             // The SDK also reaches this fallback after an unavailable refresh; rejected
@@ -109,8 +139,9 @@ export function createTrustedFetch(fetchImpl = fetch) {
     const resourceOrigin = new URL(REMOTE_URL).origin;
     const allowedOrigins = new Set([resourceOrigin]);
     let issuer;
+    // The URL parser reads any value as its string form.
     function secure(value) {
-        const url = new URL(value);
+        const url = new URL(String(value));
         if (url.protocol !== 'https:' || url.username || url.password)
             throw new Error('OAuth requires HTTPS without embedded credentials.');
         return url;
@@ -121,12 +152,18 @@ export function createTrustedFetch(fetchImpl = fetch) {
             throw new Error('OAuth endpoint is not trusted by e-Comet discovery.');
         const response = await fetchImpl(input, { ...options, redirect: 'error' });
         if (response.ok && url.pathname.includes('/.well-known/')) {
-            // Parse boundary: discovery metadata as the server sent it.
+            // Parse boundary: discovery metadata as the server sent it. JSON null has no fields to read; other
+            // non-objects read every field as absent.
             const metadata = await response.clone().json();
+            if (metadata === null)
+                throw new TypeError('OAuth discovery metadata is null.');
+            const field = (key) => (isRecord(metadata) ? metadata[key] : undefined);
             if (url.origin === resourceOrigin && url.pathname.includes('oauth-protected-resource')) {
-                if (secure(metadata.resource).origin !== resourceOrigin)
+                if (secure(field('resource')).origin !== resourceOrigin)
                     throw new Error('Untrusted protected resource metadata.');
-                const server = metadata.authorization_servers?.[0];
+                const servers = field('authorization_servers');
+                // Read the first entry the way an index read always did, whatever the server sent.
+                const server = typeof servers === 'string' || Array.isArray(servers) ? servers[0] : isRecord(servers) ? servers['0'] : undefined;
                 if (!server)
                     throw new Error('e-Comet did not advertise an OAuth issuer.');
                 issuer = secure(server);
@@ -134,11 +171,11 @@ export function createTrustedFetch(fetchImpl = fetch) {
                     throw new Error('Untrusted e-Comet OAuth issuer.');
                 allowedOrigins.add(issuer.origin);
             }
-            else if (metadata.issuer) {
-                if (!issuer || secure(metadata.issuer).href !== issuer.href)
+            else if (field('issuer')) {
+                if (!issuer || secure(field('issuer')).href !== issuer.href)
                     throw new Error('OAuth issuer differs from e-Comet discovery.');
                 for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
-                    if (metadata[key] && secure(metadata[key]).origin !== issuer.origin)
+                    if (field(key) && secure(field(key)).origin !== issuer.origin)
                         throw new Error('OAuth endpoint differs from the discovered issuer.');
                 }
             }
@@ -150,20 +187,25 @@ export function createTrustedFetch(fetchImpl = fetch) {
 export async function startCallback(expectedState, { timeoutMs = 300_000 } = {}) {
     let resolveCode;
     let rejectCode;
-    const code = new Promise((resolve, reject) => { resolveCode = resolve; rejectCode = reject; });
+    const code = new Promise((resolve, reject) => {
+        resolveCode = resolve;
+        rejectCode = reject;
+    });
     // A timeout may precede the caller awaiting the promise during discovery.
     code.catch(() => { });
-    let timer;
     const server = createServer((request, response) => {
         response.setHeader('Cache-Control', 'no-store');
         response.setHeader('Content-Type', 'text/plain; charset=utf-8');
         let url;
         // Request targets must not become URL authorities or escape this event handler as parse errors.
-        if (/^\/(?![\\/])/.test(request.url)) {
+        const target = request.url ?? '';
+        if (/^\/(?![\\/])/.test(target)) {
             try {
-                url = new URL(request.url, 'http://127.0.0.1');
+                url = new URL(target, 'http://127.0.0.1');
             }
-            catch { /* reject below */ }
+            catch {
+                /* reject below */
+            }
         }
         if (!url || request.method !== 'GET' || url.pathname !== '/callback' || url.searchParams.get('state') !== expectedState) {
             response.writeHead(400);
@@ -189,8 +231,26 @@ export async function startCallback(expectedState, { timeoutMs = 300_000 } = {})
         clearTimeout(timer);
         server.close();
     });
-    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-    timer = setTimeout(() => { rejectCode(Object.assign(new Error('OAuth login timed out.'), { errorCode: 'connection-timeout' })); server.close(); }, timeoutMs);
-    // A listening server has its address.
-    return { url: `http://127.0.0.1:${server.address().port}/callback`, code, close() { clearTimeout(timer); rejectCode(new Error('OAuth login cancelled.')); server.close(); } };
+    await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+    });
+    // The handler cannot run before this line: a request arrives only after the listen continuation.
+    const timer = setTimeout(() => {
+        rejectCode(Object.assign(new Error('OAuth login timed out.'), { errorCode: 'connection-timeout' }));
+        server.close();
+    }, timeoutMs);
+    // A listening TCP server has its address.
+    const address = server.address();
+    if (address === null || typeof address === 'string')
+        throw new Error('The OAuth callback listener has no address.');
+    return {
+        url: `http://127.0.0.1:${address.port}/callback`,
+        code,
+        close() {
+            clearTimeout(timer);
+            rejectCode(new Error('OAuth login cancelled.'));
+            server.close();
+        },
+    };
 }

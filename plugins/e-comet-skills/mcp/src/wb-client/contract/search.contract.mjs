@@ -1,7 +1,7 @@
-import { array, boolean, nonNegativeInteger, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
-import { buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, pageSchema, resultPathGuidance } from './live.mjs';
-import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
+import { authorizationEndGuidance, authorizationWorkflow, completeContractGuidance, localBridgeFailureGuidance, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { toolErrorSchema, withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
+import { array, boolean, nonNegativeInteger, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
+import { buyerOutcomeGuidance, liveAggregateSchemas, liveBaseProperties, liveInputSchema, liveToolAnnotations, pageSchema, resultPathGuidance, } from './live.mjs';
 const searchQuerySchema = object({
     query: string,
     pagesRequested: positiveInteger,
@@ -21,9 +21,23 @@ const searchSuccessSchema = object({
     productFilterApplied: boolean,
     productLimitPerQuery: positiveInteger,
     queries: array(searchQuerySchema),
-}, ['ok', 'status', 'jobType', 'jobId', 'resultPath', 'pagesRequested', 'pagesSucceeded', 'pagesFailed', 'productFilterApplied', 'queries']);
+}, [
+    'ok',
+    'status',
+    'jobType',
+    'jobId',
+    'resultPath',
+    'pagesRequested',
+    'pagesSucceeded',
+    'pagesFailed',
+    'productFilterApplied',
+    'queries',
+]);
 const searchContract = 'Get live Wildberries search results, top products, and positions for one or more phrases. Use for Russian requests about поиск, поисковая выдача, позиция товара, место по запросу, or топ товаров. ' +
-    authorizationWorkflow + localBridgeFailureGuidance + buyerOutcomeGuidance + rejectionAndHandoffGuidance +
+    authorizationWorkflow +
+    localBridgeFailureGuidance +
+    buyerOutcomeGuidance +
+    rejectionAndHandoffGuidance +
     'Authorize with job {type:"search_by_query",queries:[{query:string,pages:integer},...]}; use at most 50 pages for each query and 1000 pages total. Start with 1 page for a top list or 2-3 pages when depth is unspecified. ' +
     'For a targeted rank check, put phrases in remote job.queries and target article IDs in local productNmIds. For a top N list, use productLimitPerQuery:N. ' +
     'Read queries[].pages[].products. Use globalPosition only when globalPositionsComplete is true; position is page-local. promoted is always boolean: promoted:true means реклама (paid placement), promoted:false means органика. ' +
@@ -44,5 +58,8 @@ export const contract = {
     inputSchema: liveInputSchema('productLimitPerQuery', 'query'),
     outputSchema: withRunningAnswer(withOperationDiagnostic(objectUnion(...liveAggregateSchemas(searchSuccessSchema), toolErrorSchema))),
     annotations: liveToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'wb_search_by_query'], text: `${searchContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'wb_search_by_query'],
+        text: `${searchContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

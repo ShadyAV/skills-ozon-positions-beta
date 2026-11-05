@@ -1,12 +1,13 @@
 import { validateAuthorizedJobLimits } from './job-limits.mjs';
-import { assertOzonPromotionPeriodEqual, ozonPromotionArtifactName } from '../domain/policies/promotion.policy.mjs';
-import { parsePromotionPeriods } from '../domain/policies/package.policy.mjs';
 import { executeOzonReportPackage } from './package.mjs';
-import { ozonPackageDeadline } from '../domain/converters/package-result.converter.mjs';
 import { OZON_PROMOTION_OPERATION_MAX_MS } from '../domain/constants/limits.const.mjs';
 import { ozonDescriptorRejected, safeOzonPromotionToolError } from '../domain/converters/errors.converter.mjs';
+import { ozonPackageDeadline } from '../domain/converters/package-result.converter.mjs';
+import { parsePromotionPeriods } from '../domain/policies/package.policy.mjs';
+import { assertOzonPromotionPeriodEqual, ozonPromotionArtifactName } from '../domain/policies/promotion.policy.mjs';
 import { ToolExecutionError } from '../../shared/coded-error.mjs';
 import { StorageUnavailableError } from '../../shared/storage-unavailable.mjs';
+import { isRecord } from '../../shared/values.mjs';
 const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const SIGNED_EXPIRY_SAFETY_RESERVE_MS = 1000;
 const authorizationRejected = (cause) => new ToolExecutionError('OZON_AUTHORIZATION_REJECTED', 'The signed Ozon promotion authorization does not match this request.', 'authorization', false, { cause });
@@ -14,22 +15,23 @@ const artifactRejected = (cause) => new ToolExecutionError('ARTIFACT_REJECTED', 
 const publicArtifact = ({ name, mimeType, size, sha256 }) => ({ name, mimeType, size, sha256 });
 const artifactResources = new WeakMap();
 export const getOzonPromotionArtifactResource = (result) => artifactResources.get(result);
-export const executeOzonPromotionJob = async ({ authorization, dateFrom, dateTo, requestOzonPromotionReport, createArtifactWriter, jobBudget = { bytes: 0 }, now = Date.now, foreignJobs = undefined, }) => {
+export const executeOzonPromotionJob = async ({ authorization, dateFrom: requestedFrom, dateTo: requestedTo, requestOzonPromotionReport, createArtifactWriter, jobBudget = { bytes: 0 }, now = Date.now, foreignJobs = undefined, }) => {
+    const grant = isRecord(authorization) ? authorization : {};
+    let period;
     try {
         validateAuthorizedJobLimits(authorization, foreignJobs);
-        if (authorization.jobType !== 'ozon_seller_promotion_report')
+        if (grant.jobType !== 'ozon_seller_promotion_report')
             throw new Error('Wrong Ozon promotion job type');
-        assertOzonPromotionPeriodEqual({ dateFrom, dateTo }, authorization.job);
+        period = assertOzonPromotionPeriodEqual({ dateFrom: requestedFrom, dateTo: requestedTo }, grant.job);
     }
     catch (error) {
         throw ozonDescriptorRejected(error) ?? authorizationRejected(error);
     }
-    if (typeof requestOzonPromotionReport !== 'function' || typeof createArtifactWriter !== 'function') {
-        throw authorizationRejected(new Error('Ozon promotion execution dependencies are unavailable'));
-    }
+    // The canonical period is the requested one, unchanged.
+    const { dateFrom, dateTo } = period;
     const startedAt = now();
-    const signedDeadlineAt = typeof authorization?.expiresAt === 'number' && Number.isFinite(authorization.expiresAt)
-        ? Math.floor(authorization.expiresAt * 1000 - SIGNED_EXPIRY_SAFETY_RESERVE_MS)
+    const signedDeadlineAt = typeof grant.expiresAt === 'number' && Number.isFinite(grant.expiresAt)
+        ? Math.floor(grant.expiresAt * 1000 - SIGNED_EXPIRY_SAFETY_RESERVE_MS)
         : Infinity;
     const deadlineAt = Math.min(startedAt + OZON_PROMOTION_OPERATION_MAX_MS, signedDeadlineAt);
     const operationTimeoutMs = deadlineAt - startedAt;
@@ -63,9 +65,10 @@ export const executeOzonPromotionJob = async ({ authorization, dateFrom, dateTo,
                 stream.artifact = await stream.writer.complete(metadata);
             },
         }, operationTimeoutMs);
-        if (operationResult?.ok === false)
-            throw safeOzonPromotionToolError(operationResult.error);
-        if (operationResult?.ok !== true || !stream.writer || !stream.completion || !stream.artifact) {
+        const outcome = isRecord(operationResult) ? operationResult : {};
+        if (outcome.ok === false)
+            throw safeOzonPromotionToolError(outcome.error);
+        if (outcome.ok !== true || !stream.writer || !stream.completion || !stream.artifact) {
             throw artifactRejected(new Error('Ozon operation and artifact stream did not agree'));
         }
         const result = {
@@ -87,7 +90,7 @@ export const executeOzonPromotionJob = async ({ authorization, dateFrom, dateTo,
             try {
                 const cleanup = stream.writer.abort();
                 if (cleanupRunsPrivately)
-                    void Promise.resolve(cleanup).catch(() => undefined);
+                    Promise.resolve(cleanup).catch(() => undefined);
                 else
                     await cleanup;
             }
@@ -103,17 +106,15 @@ export const executeOzonPromotionJob = async ({ authorization, dateFrom, dateTo,
     }
 };
 export const executeOzonPromotionPackageJob = async ({ authorization, periods, requestOzonReportPackage, createArtifactWriter, jobBudget = { bytes: 0 }, now = Date.now, foreignJobs = undefined, }) => {
+    const grant = isRecord(authorization) ? authorization : {};
     try {
         validateAuthorizedJobLimits(authorization, foreignJobs);
-        if (authorization.jobType !== 'ozon_seller_promotion_reports')
+        if (grant.jobType !== 'ozon_seller_promotion_reports')
             throw new Error('Wrong Ozon promotion package job type');
         const requested = parsePromotionPeriods(periods);
-        const signed = parsePromotionPeriods(authorization.job?.periods);
+        const signed = parsePromotionPeriods(isRecord(grant.job) ? grant.job.periods : undefined);
         if (JSON.stringify(requested) !== JSON.stringify(signed))
             throw new Error('Signed Ozon promotion periods do not match');
-        if (typeof requestOzonReportPackage !== 'function' || typeof createArtifactWriter !== 'function') {
-            throw new Error('Ozon promotion package execution dependencies are unavailable');
-        }
     }
     catch (error) {
         throw ozonDescriptorRejected(error) ?? authorizationRejected(error);
@@ -121,7 +122,8 @@ export const executeOzonPromotionPackageJob = async ({ authorization, periods, r
     return executeOzonReportPackage({
         family: 'promotion',
         jobType: 'ozon_seller_promotion_reports',
-        items: periods,
+        // Parsed above: every period is an exact item object.
+        items: Array.isArray(periods) ? periods.filter(isRecord) : [],
         packageDeadline: ozonPackageDeadline(authorization, now()),
         requestOzonReportPackage,
         createArtifactWriter,
@@ -132,8 +134,15 @@ export const executeOzonPromotionPackageJob = async ({ authorization, periods, r
                 return { code: error.code, message: error.message, stage: error.stage, retryable: false };
             }
             const safe = safeOzonPromotionToolError(error);
-            return { code: safe.code, message: safe.message, stage: safe.stage, retryable: false,
-                ...(['OZON_EXECUTION_INTERRUPTED', 'ARTIFACT_REJECTED'].includes(safe.code) && safe.details ? { details: safe.details } : {}) };
+            return {
+                code: safe.code,
+                message: safe.message,
+                stage: safe.stage,
+                retryable: false,
+                ...(['OZON_EXECUTION_INTERRUPTED', 'ARTIFACT_REJECTED'].includes(safe.code) && safe.details
+                    ? { details: safe.details }
+                    : {}),
+            };
         },
     });
 };

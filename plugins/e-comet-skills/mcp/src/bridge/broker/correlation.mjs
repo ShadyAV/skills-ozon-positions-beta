@@ -3,22 +3,24 @@
 // messages: a context's adapter opens a request with a frame handler and receives every frame that carries the request's
 // id through `dispatch`; its acknowledgements go out under the same id. `send` hands a request's frame to the route.
 import { randomUUID } from 'node:crypto';
-import { AUTHORIZATION_RELEASE_TIMEOUT_MS, AUTHORIZATION_SCOPE_MAX_MS, MAX_ACTIVE_AUTHORIZATION_SCOPES, REQUEST_TIMEOUT_GRACE_MS } from '../limits.mjs';
-import { REQUEST_TIMEOUT_MS } from '../../shared/timeouts.mjs';
+import { AUTHORIZATION_RELEASE_TIMEOUT_MS, AUTHORIZATION_SCOPE_MAX_MS, MAX_ACTIVE_AUTHORIZATION_SCOPES, REQUEST_TIMEOUT_GRACE_MS, } from '../limits.mjs';
 import { ToolExecutionError } from '../../shared/coded-error.mjs';
+import { REQUEST_TIMEOUT_MS } from '../../shared/timeouts.mjs';
+import { isRecord } from '../../shared/values.mjs';
 import { MESSAGE_TYPES } from '../../transport/extension/wire.mjs';
-export const CORRELATION_LIMITS = Object.freeze({
+export const CORRELATION_LIMITS = {
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
     graceMs: REQUEST_TIMEOUT_GRACE_MS,
     releaseTimeoutMs: AUTHORIZATION_RELEASE_TIMEOUT_MS,
     scopeMaxMs: AUTHORIZATION_SCOPE_MAX_MS,
     maxActiveScopes: MAX_ACTIVE_AUTHORIZATION_SCOPES,
     scopeCeilings: new Map(),
-});
+};
 // Only the newest ended scopes are kept, so a later call through a dead lease still names why it ended.
 const ENDED_SCOPES_KEPT = 64;
 const asError = (errorOrMessage) => (errorOrMessage instanceof Error ? errorOrMessage : new Error(String(errorOrMessage)));
-export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now = () => Date.now(), createRequestId = randomUUID, onUnsettled }) {
+const isCallable = (value) => typeof value === 'function';
+export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now = () => Date.now(), createRequestId = randomUUID, onUnsettled, }) {
     const requests = new Map();
     const scopes = new Map();
     const endedScopes = new Map();
@@ -37,12 +39,7 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
         clearTimeout(entry.timer);
         return true;
     };
-    // createTimeoutError — фабрика типизированной ошибки: голый Error здесь означал,
-    // что таймаут доезжал до агента как UNEXPECTED_LOCAL_ERROR с retryable: false, то
-    // есть «повторять бесполезно» ровно там, где повтор будит уснувший service worker.
-    // A settlement that arrives while the frame is still being sent waits until the send returns, so a transform can read
-    // what the route answered.
-    const open = (request) => {
+    function open(request) {
         const id = createRequestId();
         let control;
         const result = new Promise((resolve, reject) => {
@@ -81,7 +78,7 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
                 type: request.type,
                 state: control.state,
                 scopeId: request.authorization?.scopeId,
-                control: control,
+                control,
                 onFrame: request.onFrame,
                 onScopeEnded: request.onScopeEnded,
                 onAbort: request.onAbort,
@@ -90,7 +87,9 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
             if (request.timeoutMs !== undefined) {
                 // A deadline ends the request as a cancellation does, through its own abort handler, so a requester that
                 // holds a reservation releases it on every path.
-                entry.timer = setTimeout(() => void abort(id, request.timeoutError?.() ?? new Error('The request timed out.')), request.timeoutMs);
+                entry.timer = setTimeout(() => {
+                    abort(id, request.timeoutError?.() ?? new Error('The request timed out.'));
+                }, request.timeoutMs);
                 // Unref'd like the scope expiry below: the deadline must still fire while the process is serving, but it must
                 // not be what keeps the event loop alive after shutdown has closed every route.
                 if (request.unrefTimer !== false)
@@ -118,7 +117,7 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
             }
         });
         return { id, result, cancel: (reason) => abort(id, reason ?? new Error('The request was cancelled.')) };
-    };
+    }
     // Ends one open request as a closed session or a cancellation does: the request's own handler, or a plain rejection.
     const abort = (id, errorOrMessage) => {
         const entry = requests.get(id);
@@ -169,23 +168,23 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
                 ? 'Browser job authorization must be acquired again: this one was released when its job ended. Request a new browser job for further work.'
                 : 'Browser job authorization must be acquired again after the bridge connection changed. Request a new browser job for the remaining work.';
         const error = new ToolExecutionError('BROWSER_JOB_REAUTHORIZATION_REQUIRED', message, 'authorization', true);
-        error.details = Object.freeze({ reason });
+        error.details = { reason };
         return error;
     };
     const scopeEnded = (scopeId) => {
-        const ended = endedScopes.get(scopeId);
+        const ended = scopeId === undefined ? undefined : endedScopes.get(scopeId);
         return reauthorizationRequired(ended?.reason, ended?.ceilingMs);
     };
     // A seller export drives many reports through one scope, so it gets the longer ceiling its executor is deadlined
     // against rather than the single-round-trip default. Either way the signed token wins: a scope must never outlive the
     // authorization it was granted under.
     // Parse boundary: the grant is the extension's answer, read field by field.
-    const scopeCeiling = (authorization) => limits.scopeCeilings.get(authorization?.jobType) ?? limits.scopeMaxMs;
-    const scopeLifetime = (authorization) => {
-        const ceiling = scopeCeiling(authorization);
-        if (typeof authorization?.expiresAt !== 'number' || !Number.isFinite(authorization.expiresAt))
+    const scopeCeiling = (grant) => limits.scopeCeilings.get(grant.jobType) ?? limits.scopeMaxMs;
+    const scopeLifetime = (grant) => {
+        const ceiling = scopeCeiling(grant);
+        if (typeof grant.expiresAt !== 'number' || !Number.isFinite(grant.expiresAt))
             return ceiling;
-        return Math.max(0, Math.min(ceiling, authorization.expiresAt * 1000 - now()));
+        return Math.max(0, Math.min(ceiling, grant.expiresAt * 1000 - now()));
     };
     const releaseScope = async (scopeId, notifyRoute, reason = undefined) => {
         const scope = scopes.get(scopeId);
@@ -194,9 +193,10 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
         scopes.delete(scopeId);
         clearTimeout(scope.expiryTimer);
         // Later calls through the same lease name the same cause; only the newest few ended scopes are kept.
-        endedScopes.set(scopeId, { reason: scope.expired ? 'expired' : reason ?? 'route_changed', ceilingMs: scope.ceilingMs });
-        if (endedScopes.size > ENDED_SCOPES_KEPT)
-            endedScopes.delete(endedScopes.keys().next().value);
+        endedScopes.set(scopeId, { reason: scope.expired ? 'expired' : (reason ?? 'route_changed'), ceilingMs: scope.ceilingMs });
+        const oldest = endedScopes.keys().next();
+        if (endedScopes.size > ENDED_SCOPES_KEPT && !oldest.done)
+            endedScopes.delete(oldest.value);
         // Release must end the scope's requests synchronously, before any asynchronous route cleanup. Other scopes remain
         // active; their requests must not inherit this operation's terminal cause.
         for (const [id, entry] of requests) {
@@ -209,13 +209,13 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
                 entry.control.reject(scopeEnded(scopeId));
             }
         }
-        if (notifyRoute && typeof scope.releaseRoute === 'function')
+        if (notifyRoute && scope.releaseRoute !== undefined)
             await scope.releaseRoute(scope.authorizationId);
         return true;
     };
     const releaseScopeInBackground = (scopeId, notifyRoute) => {
-        void releaseScope(scopeId, notifyRoute).catch((error) => {
-            reportUnsettled('authorization-release-error', scopeId, error?.code);
+        releaseScope(scopeId, notifyRoute).catch((error) => {
+            reportUnsettled('authorization-release-error', scopeId, isRecord(error) ? error.code : undefined);
         });
     };
     // Ends every scope; on a closed session nothing is sent for them.
@@ -226,9 +226,9 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
     const scopeIsActive = (scopeId, scope = scopes.get(scopeId)) => {
         if (!scope || scopes.get(scopeId) !== scope)
             return false;
-        if (typeof scope.isRouteActive !== 'function')
+        if (scope.isRouteActive === undefined)
             return true;
-        let routeActive = false;
+        let routeActive;
         try {
             routeActive = scope.isRouteActive() === true;
         }
@@ -244,6 +244,7 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
         if (count(MESSAGE_TYPES.browserJobAuthorize) + scopes.size >= limits.maxActiveScopes) {
             return Promise.reject(new ToolExecutionError('AUTHORIZATION_SCOPE_CAPACITY_EXCEEDED', 'Too many browser job authorization scopes are active.', 'local', true));
         }
+        // The extension answers with the grant; the transform builds the lease from it.
         return open({
             type: MESSAGE_TYPES.browserJobAuthorize,
             payload: { token },
@@ -261,18 +262,22 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
             // Parse boundary: the grant and the route's binding are read field by field.
             transform: (authorization, control) => {
                 const scopeId = control.id;
+                const grant = isRecord(authorization) ? authorization : {};
                 const sendResult = control.sendResult;
-                const binding = typeof sendResult === 'function' ? { release: sendResult }
-                    : sendResult && typeof sendResult === 'object' ? sendResult : {};
-                const lifetimeMs = scopeLifetime(authorization);
+                const binding = isCallable(sendResult)
+                    ? { release: sendResult }
+                    : isRecord(sendResult)
+                        ? sendResult
+                        : {};
+                const lifetimeMs = scopeLifetime(grant);
                 const scope = {
-                    authorizationId: authorization?.authorizationId,
-                    jobType: authorization?.jobType,
-                    job: authorization?.job,
+                    authorizationId: grant.authorizationId,
+                    jobType: grant.jobType,
+                    job: grant.job,
                     expiresAtMs: now() + lifetimeMs,
-                    ceilingMs: scopeCeiling(authorization),
-                    isRouteActive: binding.isActive,
-                    releaseRoute: binding.release,
+                    ceilingMs: scopeCeiling(grant),
+                    isRouteActive: isCallable(binding.isActive) ? binding.isActive : undefined,
+                    releaseRoute: isCallable(binding.release) ? binding.release : undefined,
                     expiryTimer: undefined,
                 };
                 scope.expiryTimer = setTimeout(() => {
@@ -282,11 +287,11 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
                 scope.expiryTimer.unref?.();
                 scopes.set(scopeId, scope);
                 return {
-                    id: authorization?.authorizationId,
+                    id: grant.authorizationId,
                     scopeId,
-                    jobType: authorization?.jobType,
-                    signedJob: authorization?.job,
-                    expiresAt: authorization?.expiresAt,
+                    jobType: grant.jobType,
+                    signedJob: grant.job,
+                    expiresAt: grant.expiresAt,
                     authorization,
                     isActive: () => scopeIsActive(scopeId, scope),
                     release: () => releaseScope(scopeId, true, 'released'),
@@ -295,8 +300,8 @@ export function createCorrelationBroker({ send, limits = CORRELATION_LIMITS, now
         }).result;
     };
     const releaseAuthorization = (authorizationId, route, timeoutMs = limits.releaseTimeoutMs) => {
-        if (typeof authorizationId !== 'string' || authorizationId.length === 0 || typeof route !== 'function') {
-            return Promise.reject(new TypeError('Authorization release requires an authorization ID and route.'));
+        if (typeof authorizationId !== 'string' || authorizationId.length === 0) {
+            return Promise.reject(new TypeError('Authorization release requires an authorization ID.'));
         }
         return open({
             type: MESSAGE_TYPES.browserJobAuthorizationRelease,

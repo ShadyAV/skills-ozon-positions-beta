@@ -1,6 +1,6 @@
+import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, coworkCopyStep, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
+import { failureDetailsSchema, fileDeliverySchema, toolErrorSchema, triggerUrlProperty, withOperationDiagnostic, withRunningAnswer, } from '../../transport/mcp/results.mjs';
 import { array, boolean, nonNegativeInteger, object, objectUnion, positiveInteger, string } from '../../transport/mcp/schema.mjs';
-import { failureDetailsSchema, fileDeliverySchema, toolErrorSchema, triggerUrlProperty, withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
-import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, coworkCopyStep, rejectionAndHandoffGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
 const sellerArtifactSchema = object({
     name: string,
     path: string,
@@ -42,7 +42,8 @@ const sellerReviewsSuccessSchema = object({
 }, ['ok', 'status', 'jobType', 'jobId', 'exports']);
 const sellerReviewsContract = 'Original WB seller-review XLSX. ' +
     'Call remote browser_job once: job {type:"seller_reviews",exports:[{product_id?:int,dateFrom?,dateTo?,isAnswered?:bool,ratings?:[1|2|3|4|5,...],content?},...],org?}, then this tool once it returns, never in the same parallel step. ' +
-    'Trusted Claude Code/Codex hooks inject authorization: omit triggerUrl/trigger_url. ' + coworkCopyStep +
+    'Trusted Claude Code/Codex hooks inject authorization: omit triggerUrl/trigger_url. ' +
+    coworkCopyStep +
     'Never decode, print, edit or expose it. ' +
     'Never infer authorization failure from status. ' +
     rejectionAndHandoffGuidance +
@@ -53,11 +54,11 @@ const sellerReviewsContract = 'Original WB seller-review XLSX. ' +
     'Omitted isAnswered produces separate answered and unanswered workbooks. ' +
     'Omit org for active seller company; another requires explicit user choice and one signed {id} or exact {name}. ' +
     'For legacy-restoration ENTITY_SELECTION_REQUIRED, ask company, then reauthorize explicitly; never guess. ' +
-    'SELLER_LOGIN_REQUIRED means no signed-in seller cabinet tab: the user opens seller.wildberries.ru in the browser where the extension is connected and signs in; then one fresh browser_job on the user\'s decision. ' +
-    'SELLER_AUTH_UNAVAILABLE with reason access_token_missing, seller_token_missing or both_missing: the user reloads the seller portal tab and signs in if it asks, then one fresh browser_job on the user\'s decision; the same reason again, header_too_long or reader_failed is an e-Comet defect to report, never repeated. ' +
+    "SELLER_LOGIN_REQUIRED means no signed-in seller cabinet tab: the user opens seller.wildberries.ru in the browser where the extension is connected and signs in; then one fresh browser_job on the user's decision. " +
+    "SELLER_AUTH_UNAVAILABLE with reason access_token_missing, seller_token_missing or both_missing: the user reloads the seller portal tab and signs in if it asks, then one fresh browser_job on the user's decision; the same reason again, header_too_long or reader_failed is an e-Comet defect to report, never repeated. " +
     'stopReason "unrecognized_response" with SELLER_RESPONSE_INVALID: WB answered the report status in a shape e-Comet does not recognize; no user step, an e-Comet defect to report, never repeated. ' +
     'Max 50 exports/100 reports, 100 MiB/XLSX, 500 MiB/job. ' +
-    'JOB_ARTIFACT_QUOTA_EXCEEDED: the job\'s workbooks passed 500 MiB; split it into smaller exports, each with its own browser_job on the user\'s decision. ' +
+    "JOB_ARTIFACT_QUOTA_EXCEEDED: the job's workbooks passed 500 MiB; split it into smaller exports, each with its own browser_job on the user's decision. " +
     'Artifacts retained for 24 hours, never evicted by another export. ' +
     'Return all resource links; summarize complete/failed/skipped. ' +
     'Empty workbook cannot establish ownership. ' +
@@ -85,5 +86,8 @@ export const contract = {
     inputSchema: object({ triggerUrl: triggerUrlProperty }),
     outputSchema: withRunningAnswer(withOperationDiagnostic(objectUnion(sellerReviewsSuccessSchema, toolErrorSchema))),
     annotations: reportToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'wb_seller_reviews'], text: `${sellerReviewsContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'wb_seller_reviews'],
+        text: `${sellerReviewsContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

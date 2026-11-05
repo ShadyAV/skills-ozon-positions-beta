@@ -1,9 +1,9 @@
-import { array, nonNegativeInteger, object } from '../../transport/mcp/schema.mjs';
-import { ozonPackageAuthorizationWorkflow, ozonPackageError, ozonTriggerUrlProperty, packageItemSchemas, packageResultSchema, promotionPeriodFields, reportToolAnnotations } from './reports.mjs';
-import { OZON_ANALYTICS_TERMINAL_CODE_STAGES } from '../../transport/extension/wire.mjs';
-import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, packageSafety, rejectionAndHandoffGuidance, reportDeliveryGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
+import { ozonPackageAuthorizationWorkflow, ozonPackageError, ozonTriggerUrlProperty, packageItemSchemas, packageResultSchema, promotionPeriodFields, reportToolAnnotations, } from './reports.mjs';
 import { MAX_OZON_REPORT_PACKAGE_ITEMS } from '../domain/constants/limits.const.mjs';
+import { OZON_ANALYTICS_TERMINAL_CODE_STAGES } from '../../transport/extension/wire.mjs';
+import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, packageSafety, rejectionAndHandoffGuidance, reportDeliveryGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
+import { array, nonNegativeInteger, object } from '../../transport/mcp/schema.mjs';
 const ozonAnalyticsArtifactSchema = object({
     name: { type: 'string', pattern: '^ozon-seller-analytics-(period|daily)-\\d{4}-\\d{2}-\\d{2}-\\d{4}-\\d{2}-\\d{2}\\.xlsx$' },
     mimeType: { const: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
@@ -32,7 +32,8 @@ export const contract = {
     name: 'ozon_seller_analytics_report',
     description: 'Download Ozon Seller general analytics XLSX in an ordered package with period or daily breakdown. daily means daily rows in one workbook per report, not one report per day. ' +
         signedDiscovery('ozon_seller_analytics_report', 'ozon_seller_analytics_report') +
-        packageSafety + completeContractGuidance,
+        packageSafety +
+        completeContractGuidance,
     inputSchema: object({
         reports: array(object(analyticsReportFields, ['dateFrom', 'dateTo', 'breakdown']), {
             minItems: 1,
@@ -43,5 +44,8 @@ export const contract = {
     }, ['reports']),
     outputSchema: withRunningAnswer(withOperationDiagnostic(packageResultSchema('ozon_seller_analytics_report', 'reports', analyticsPackageItems))),
     annotations: reportToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'ozon_seller_analytics_report'], text: `${analyticsPackageContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'ozon_seller_analytics_report'],
+        text: `${analyticsPackageContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

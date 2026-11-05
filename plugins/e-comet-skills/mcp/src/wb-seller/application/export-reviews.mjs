@@ -1,8 +1,9 @@
-import { MAX_CONSECUTIVE_SELLER_EXPORT_FAILURES, MAX_CONSECUTIVE_SELLER_POLL_FAILURES, MIN_SELLER_OPERATION_AGENT_INTERVAL_MS, MAX_SELLER_REVIEW_DOWNLOAD_ATTEMPTS, MAX_SELLER_REVIEW_EXPORTS, MAX_SELLER_REVIEW_PHYSICAL_REPORTS, MAX_SELLER_REVIEW_POLLS_PER_REPORT, SELLER_DOWNLOAD_TIMEOUT_MS, SELLER_JOB_MAX_DURATION_MS } from '../domain/constants/limits.const.mjs';
-import { SELLER_OPERATION_STAGES } from '../../transport/extension/wire.mjs';
-import { LOCAL_STORAGE_MESSAGES, artifactFailureDetails, artifactFailureMessage, closedFailureDetails } from '../../transport/failures/vocabulary.mjs';
 import { ToolExecutionError } from '../../shared/coded-error.mjs';
+import { fieldOf, isUnknownArray } from '../../shared/values.mjs';
+import { SELLER_OPERATION_STAGES } from '../../transport/extension/wire.mjs';
+import { LOCAL_STORAGE_MESSAGES, artifactFailureDetails, artifactFailureMessage, closedFailureDetails, } from '../../transport/failures/vocabulary.mjs';
 import { validateAuthorizedJobLimits } from './job-limits.mjs';
+import { MAX_CONSECUTIVE_SELLER_EXPORT_FAILURES, MAX_CONSECUTIVE_SELLER_POLL_FAILURES, MIN_SELLER_OPERATION_AGENT_INTERVAL_MS, MAX_SELLER_REVIEW_DOWNLOAD_ATTEMPTS, MAX_SELLER_REVIEW_POLLS_PER_REPORT, SELLER_DOWNLOAD_TIMEOUT_MS, SELLER_JOB_MAX_DURATION_MS, } from '../domain/constants/limits.const.mjs';
 const SELLER_XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const SELLER_ABORT_CODES = new Set([
     'SELLER_LOGIN_REQUIRED',
@@ -33,9 +34,7 @@ const normalizeSellerExports = (exports) => exports.flatMap((sellerExport) => {
         ...(sellerExport.product_id === undefined ? {} : { product_id: sellerExport.product_id }),
         ...(sellerExport.dateFrom === undefined ? {} : { dateFrom: sellerExport.dateFrom }),
         ...(sellerExport.dateTo === undefined ? {} : { dateTo: sellerExport.dateTo }),
-        ...(sellerExport.ratings === undefined
-            ? {}
-            : { ratings: [...sellerExport.ratings].sort((left, right) => left - right) }),
+        ...(sellerExport.ratings === undefined ? {} : { ratings: [...sellerExport.ratings].sort((left, right) => left - right) }),
         ...(sellerExport.content === undefined ? {} : { content: sellerExport.content }),
     };
     if (sellerExport.isAnswered === undefined) {
@@ -64,17 +63,36 @@ const sellerArtifactName = (sellerExport) => {
 const sellerError = (error, fallbackCode, fallbackMessage, stage = 'execution', retryable = false) => {
     if (error instanceof ToolExecutionError) {
         const details = closedFailureDetails(error.details);
-        return { code: error.code, message: error.message, stage: error.stage, retryable: error.retryable, ...(details ? { details } : {}) };
+        return {
+            code: error.code,
+            message: error.message,
+            stage: error.stage,
+            retryable: error.retryable,
+            ...(details ? { details } : {}),
+        };
     }
     // A local workbook write: a filesystem refusal is LOCAL_STORAGE_FAILED with its code, any other its closed class.
     const artifact = artifactFailureDetails(error);
     if (artifact?.systemCode) {
-        return { code: 'LOCAL_STORAGE_FAILED', message: LOCAL_STORAGE_MESSAGES[artifact.systemCode], stage: 'storage', retryable: true, details: artifact };
+        const messages = LOCAL_STORAGE_MESSAGES;
+        return {
+            code: 'LOCAL_STORAGE_FAILED',
+            message: messages[artifact.systemCode],
+            stage: 'storage',
+            retryable: true,
+            details: artifact,
+        };
     }
-    const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(error.code) ? error.code : fallbackCode;
-    return { code, message: artifactFailureMessage(artifact) ?? fallbackMessage, stage: error?.stage || stage,
-        retryable: typeof error?.retryable === 'boolean' ? error.retryable : retryable,
-        ...(artifact ? { details: artifact } : {}) };
+    const errorCode = fieldOf(error, 'code');
+    const errorRetryable = fieldOf(error, 'retryable');
+    const code = typeof errorCode === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(errorCode) ? errorCode : fallbackCode;
+    return {
+        code,
+        message: artifactFailureMessage(artifact) ?? fallbackMessage,
+        stage: fieldOf(error, 'stage') || stage,
+        retryable: typeof errorRetryable === 'boolean' ? errorRetryable : retryable,
+        ...(artifact ? { details: artifact } : {}),
+    };
 };
 // A per-operation timeout is retryable by construction: the poll and download loops already own their
 // own retry budgets, so it must not be swallowed by the stage-based package abort below. WB_FETCH_TIMEOUT
@@ -82,29 +100,41 @@ const sellerError = (error, fallbackCode, fallbackMessage, stage = 'execution', 
 // before the agent's, which carries a grace margin, so a slow cabinet reaches us under that code rather
 // than as SELLER_OPERATION_TIMEOUT. It arrives with retryable false, so nothing else marks it survivable.
 const SELLER_RETRY_ONLY_CODES = new Set(['SELLER_OPERATION_TIMEOUT', 'WB_FETCH_TIMEOUT']);
+// Whether a failure's code is one of `codes`.
+const hasCodeIn = (codes, error) => {
+    const code = fieldOf(error, 'code');
+    return typeof code === 'string' && codes.has(code);
+};
 // Parse boundary: whatever an operation or a writer threw.
-const abortsSellerPackage = (error) => error?.stage === 'storage' && error?.retryable === false
-    ? true
-    : SELLER_RETRY_ONLY_CODES.has(error?.code)
-        ? false
-        : error instanceof ToolExecutionError
-            ? error.stage === 'authorization' || error.stage === 'extension' || SELLER_ABORT_CODES.has(error.code)
-            : error?.stage === 'authorization' || error?.stage === 'extension' || SELLER_ABORT_CODES.has(error?.code);
+const abortsSellerPackage = (error) => {
+    const stage = fieldOf(error, 'stage');
+    return stage === 'storage' && fieldOf(error, 'retryable') === false
+        ? true
+        : hasCodeIn(SELLER_RETRY_ONLY_CODES, error)
+            ? false
+            : stage === 'authorization' || stage === 'extension' || hasCodeIn(SELLER_ABORT_CODES, error);
+};
 // Parse boundary: the cabinet's answers as the extension relayed them.
-const reportIdFromCreate = (response) => response?.data?.reportId ?? response?.reportId;
+const reportIdFromCreate = (response) => fieldOf(fieldOf(response, 'data'), 'reportId') ?? fieldOf(response, 'reportId');
 // A poll answer is recognized when it names this report's status or lists reports; anything else is not "still running".
-const isRecognizedPoll = (response) => [response?.data, response].some((body) => (typeof body?.reportId === 'string' && typeof body.status === 'string') || Array.isArray(body?.reportsInfo));
+const isRecognizedPoll = (response) => [fieldOf(response, 'data'), response].some((body) => (typeof fieldOf(body, 'reportId') === 'string' && typeof fieldOf(body, 'status') === 'string') ||
+    Array.isArray(fieldOf(body, 'reportsInfo')));
 const unrecognizedPoll = () => new ToolExecutionError('SELLER_RESPONSE_INVALID', 'Wildberries answered the review report status in a shape e-Comet does not recognize, so the export stopped instead of polling until it ' +
     'times out. This is an e-Comet defect: offer to report it; do not repeat the export automatically.', 'execution', false);
 const reportStatusFromPoll = (response, reportId) => {
-    if (response?.data?.reportId === reportId && typeof response.data.status === 'string')
-        return response.data.status;
-    if (response?.reportId === reportId && typeof response.status === 'string')
-        return response.status;
-    const reports = response?.data?.reportsInfo ?? response?.reportsInfo;
-    return Array.isArray(reports) ? reports.find((report) => report?.reportId === reportId)?.status : undefined;
+    const data = fieldOf(response, 'data');
+    const dataStatus = fieldOf(data, 'status');
+    if (fieldOf(data, 'reportId') === reportId && typeof dataStatus === 'string')
+        return dataStatus;
+    const status = fieldOf(response, 'status');
+    if (fieldOf(response, 'reportId') === reportId && typeof status === 'string')
+        return status;
+    const reports = fieldOf(data, 'reportsInfo') ?? fieldOf(response, 'reportsInfo');
+    return isUnknownArray(reports)
+        ? fieldOf(reports.find((report) => fieldOf(report, 'reportId') === reportId), 'status')
+        : undefined;
 };
-const delay = (milliseconds) => (milliseconds > 0 ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve());
+const delay = (milliseconds) => milliseconds > 0 ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve();
 /**
  * Executes a signed seller-review report workflow. The extension has already validated
  * the descriptor; this executor only expands its immutable scope into physical reports.
@@ -121,9 +151,8 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
     // five minutes, not in `maxJobDurationMs`. The reserve has to cover every download attempt the loop
     // below is allowed to make, not just the first, or the retry is what crosses the expiry.
     const downloadReserveMs = downloadTimeoutMs * Math.max(1, maxDownloadAttempts);
-    const authorizationExpiresAtMs = typeof authorization?.expiresAt === 'number' && Number.isFinite(authorization.expiresAt)
-        ? authorization.expiresAt * 1000 - downloadReserveMs
-        : Infinity;
+    const expiresAt = fieldOf(authorization, 'expiresAt');
+    const authorizationExpiresAtMs = typeof expiresAt === 'number' && Number.isFinite(expiresAt) ? expiresAt * 1000 - downloadReserveMs : Infinity;
     const jobDeadline = Math.min(now() + maxJobDurationMs, authorizationExpiresAtMs);
     const deadlineExceeded = () => now() >= jobDeadline;
     const deadlineFailure = (result) => ({
@@ -136,7 +165,6 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
             retryable: true,
         },
     });
-    const jobId = authorization?.job?.jobId;
     let lastSellerOperationSentAt;
     // The poll cadence only ever covered poll-to-poll. Create-to-first-poll, poll-to-download and
     // export-to-export had no pacing at all, which is what let a package burst at the cabinet.
@@ -152,13 +180,9 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
         lastSellerOperationSentAt = now();
         return requestSellerOperation(...args);
     };
-    validateAuthorizedJobLimits(authorization);
-    if (authorization.jobType !== 'seller_reviews')
-        throw new Error('Seller review executor requires a seller_reviews authorization');
-    if (typeof requestSellerOperation !== 'function' || typeof createArtifactWriter !== 'function') {
-        throw new Error('Seller review execution dependencies are unavailable');
-    }
-    const physicalExports = normalizeSellerExports(authorization.job.exports);
+    // Any other job type fails the check.
+    const { job } = validateAuthorizedJobLimits(authorization);
+    const physicalExports = normalizeSellerExports(job.exports);
     const exports = [];
     let packageAborted = false;
     let stopReason;
@@ -180,8 +204,7 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
         if (consecutiveExportFailures >= maxConsecutiveExportFailures)
             packageAborted = true;
     };
-    for (let exportIndex = 0; exportIndex < physicalExports.length; exportIndex += 1) {
-        const sellerExport = physicalExports[exportIndex];
+    for (const [exportIndex, sellerExport] of physicalExports.entries()) {
         const result = {
             ...(sellerExport.product_id === undefined ? {} : { product_id: sellerExport.product_id }),
             isAnswered: sellerExport.isAnswered,
@@ -206,10 +229,11 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
                 isAnswered: sellerExport.isAnswered,
                 stage: SELLER_OPERATION_STAGES.create,
             });
-            reportId = reportIdFromCreate(createResponse);
-            if (typeof reportId !== 'string' || reportId.length === 0) {
+            const createdReportId = reportIdFromCreate(createResponse);
+            if (typeof createdReportId !== 'string' || createdReportId.length === 0) {
                 throw new ToolExecutionError('REPORT_CREATE_OUTCOME_UNKNOWN', 'Wildberries did not confirm creation of the review report.', 'execution', false);
             }
+            reportId = createdReportId;
         }
         catch (error) {
             const normalized = sellerError(error, 'REPORT_FAILED', 'Wildberries could not create the review report.');
@@ -270,7 +294,7 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
                     // Slowness is not refusal. A cabinet that keeps timing out may still finish the
                     // next report, so the export gives up while the package goes on; only a failure
                     // that says the cabinet will answer the same way for everyone stops the run.
-                    if (error?.retryable !== true && !SELLER_RETRY_ONLY_CODES.has(error?.code)) {
+                    if (fieldOf(error, 'retryable') !== true && !hasCodeIn(SELLER_RETRY_ONLY_CODES, error)) {
                         packageAborted = true;
                     }
                     break;
@@ -289,16 +313,22 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
             // agent to wait longer for a report that was never being refused for time reasons. An
             // opaque failure has no cause to carry, so it must at least not claim to be a
             // retryable timeout while the package it just stopped stays stopped.
-            const error = stopReason === 'unrecognized_response' ? pollFailure : pollBreakerTripped
-                ? pollFailure instanceof ToolExecutionError
-                    ? pollFailure
-                    : new ToolExecutionError('REPORT_POLL_FAILED', 'Wildberries stopped answering polls for this review report.', 'execution', false)
-                : pollFailure instanceof ToolExecutionError && abortsSellerPackage(pollFailure)
-                    ? pollFailure
-                    : pollFailure instanceof ToolExecutionError && ['REPORT_STOPPED', 'REPORT_FAILED'].includes(pollFailure.code)
+            const error = stopReason === 'unrecognized_response'
+                ? pollFailure
+                : pollBreakerTripped
+                    ? pollFailure instanceof ToolExecutionError
                         ? pollFailure
-                        : new ToolExecutionError('REPORT_TIMEOUT', 'Wildberries did not complete the review report in time.', 'execution', true);
-            recordExport({ ...result, status: 'failed', error: sellerError(error, 'REPORT_TIMEOUT', 'Wildberries did not complete the review report in time.') }, { systemic: !reportVerdict });
+                        : new ToolExecutionError('REPORT_POLL_FAILED', 'Wildberries stopped answering polls for this review report.', 'execution', false)
+                    : pollFailure instanceof ToolExecutionError && abortsSellerPackage(pollFailure)
+                        ? pollFailure
+                        : pollFailure instanceof ToolExecutionError && ['REPORT_STOPPED', 'REPORT_FAILED'].includes(pollFailure.code)
+                            ? pollFailure
+                            : new ToolExecutionError('REPORT_TIMEOUT', 'Wildberries did not complete the review report in time.', 'execution', true);
+            recordExport({
+                ...result,
+                status: 'failed',
+                error: sellerError(error, 'REPORT_TIMEOUT', 'Wildberries did not complete the review report in time.'),
+            }, { systemic: !reportVerdict });
             continue;
         }
         // Polling can burn the whole budget on its own, so the report being ready is not proof there
@@ -378,7 +408,7 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
                     // its write chain. Keep that cleanup caught without holding the public result
                     // hostage to a filesystem operation. Do not retry while old I/O is outstanding.
                     if (writer)
-                        void writer.abort().catch(() => {
+                        writer.abort().catch(() => {
                             console.error('ARTIFACT_CLEANUP_FAILED: Deferred WB workbook cleanup failed.');
                         });
                     packageAborted = true;
@@ -411,7 +441,7 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
                 ...result,
                 status: 'failed',
                 error: sellerError(downloadError, 'ARTIFACT_STORAGE_FAILED', 'The review workbook could not be stored locally.', 'storage', true),
-            }, { systemic: downloadError?.code !== 'ARTIFACT_TOO_LARGE' });
+            }, { systemic: fieldOf(downloadError, 'code') !== 'ARTIFACT_TOO_LARGE' });
         }
     }
     const succeeded = exports.filter((item) => item.status === 'complete').length;
@@ -419,8 +449,8 @@ pollIntervalMs = 3000, minSellerOperationIntervalMs = MIN_SELLER_OPERATION_AGENT
         ok: succeeded > 0,
         status: succeeded === exports.length ? 'complete' : succeeded > 0 ? 'partial' : 'failed',
         jobType: 'seller_reviews',
-        jobId,
-        ...(authorization.job.org ? { org: authorization.job.org } : {}),
+        jobId: job.jobId,
+        ...(job.org ? { org: job.org } : {}),
         ...(stopReason ? { stopReason } : {}),
         exports,
     };

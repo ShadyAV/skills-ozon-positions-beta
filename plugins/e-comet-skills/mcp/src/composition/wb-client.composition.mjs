@@ -14,12 +14,27 @@ export const wbClientTools = (registry, { ensureBroker, requestBrowserJobAuthori
     const results = createResults(createJobWriter ? { createJobWriter } : {});
     const authorization = createAuthorization({ ensureBroker, requestBrowserJobAuthorization });
     return [
-        ...BUYER_TOOLS.map((tool) => [tool.contract.name, createBuyerTool(tool, {
-                answer: registry.answer(tool.contract.name), authorization, wbFetch, results,
-                withDownloadedUpdate: registry.withDownloadedUpdate, log,
-            })]),
-        ['wb_product_images', createImagesTool({
-                answer: registry.answer('wb_product_images'), results, images: { exists: probeImageExists }, shutdownSignal, log, imageOrigin,
-            })],
+        ...BUYER_TOOLS.map((tool) => [
+            tool.contract.name,
+            createBuyerTool(tool, {
+                answer: registry.answer(tool.contract.name),
+                authorization,
+                wbFetch,
+                results,
+                withDownloadedUpdate: registry.withDownloadedUpdate,
+                log,
+            }),
+        ]),
+        [
+            'wb_product_images',
+            createImagesTool({
+                answer: registry.answer('wb_product_images'),
+                results,
+                images: { exists: probeImageExists },
+                shutdownSignal,
+                log,
+                imageOrigin,
+            }),
+        ],
     ];
 };

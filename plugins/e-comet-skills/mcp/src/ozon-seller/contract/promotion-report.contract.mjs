@@ -1,9 +1,9 @@
-import { object, objectUnion, string } from '../../transport/mcp/schema.mjs';
-import { OZON_EXTENSION_OUTDATED_REASON, OZON_PROMOTION_TERMINAL_CODE_STAGES } from '../../transport/failures/vocabulary.mjs';
+import { artifactRejectedDetailsSchema, canonicalDateProperty, localStorageUnavailableSchema, ozonAuthorizationRejectedDetailsSchema, ozonHandoffGuidance, ozonHookInjection, ozonPromotionArtifactSchema, ozonScopeGuard, ozonTriggerUrlProperty, reportToolAnnotations, } from './reports.mjs';
 import { EXTENSION_UPDATE_URL, OZON_PROMOTION_CAPABILITY, OZON_PROMOTION_MIN_EXTENSION_VERSION } from '../../transport/extension/wire.mjs';
-import { artifactRejectedDetailsSchema, canonicalDateProperty, localStorageUnavailableSchema, ozonAuthorizationRejectedDetailsSchema, ozonHandoffGuidance, ozonHookInjection, ozonPromotionArtifactSchema, ozonScopeGuard, ozonTriggerUrlProperty, reportToolAnnotations } from './reports.mjs';
+import { OZON_EXTENSION_OUTDATED_REASON, OZON_PROMOTION_TERMINAL_CODE_STAGES } from '../../transport/failures/vocabulary.mjs';
+import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, rejectionAndHandoffGuidance, reportDeliveryGuidance, runningAnswerGuidance, signedDiscovery, } from '../../transport/mcp/prose.mjs';
 import { fileDeliverySchema, withOperationDiagnostic, withRunningAnswer } from '../../transport/mcp/results.mjs';
-import { BRIDGE_FAILURE_GUIDANCE, authorizationEndGuidance, completeContractGuidance, rejectionAndHandoffGuidance, reportDeliveryGuidance, runningAnswerGuidance, signedDiscovery } from '../../transport/mcp/prose.mjs';
+import { object, objectUnion, string } from '../../transport/mcp/schema.mjs';
 // Устаревшее расширение не получает собственный терминальный код: набор кодов зафиксирован в общем
 // с расширением контракте. Диагноз едет в message и в этих полях, поэтому его видно и агенту, и в
 // структурированном ответе, а обычный отказ маршрута остаётся без details.
@@ -77,7 +77,7 @@ export const contract = {
     description: 'Download one Ozon Seller promotion report XLSX for one requested period. ' +
         signedDiscovery('ozon_seller_promotion_report', 'ozon_seller_promotion_report') +
         'May create a saved report. CREATE_OUTCOME_UNKNOWN means creation may have succeeded: obtain a separate retry decision. Never automatically repeat uncertain creates, rate-limited work or completed reports for delivery failure; preserve the private resource link and recover the same workbook. ' +
-        'An unready route\'s message names its step when the extension knows the cause; extension_outdated details require an extension update. Never use WB-tab recovery or local_bridge_status to gate Ozon. ' +
+        "An unready route's message names its step when the extension knows the cause; extension_outdated details require an extension update. Never use WB-tab recovery or local_bridge_status to gate Ozon. " +
         completeContractGuidance,
     inputSchema: object({
         dateFrom: canonicalDateProperty,
@@ -86,5 +86,8 @@ export const contract = {
     }, ['dateFrom', 'dateTo']),
     outputSchema: withRunningAnswer(withOperationDiagnostic(objectUnion(ozonPromotionSuccessSchema, ozonPromotionFailureSchema, ozonPromotionPreflightFailureSchema))),
     annotations: reportToolAnnotations,
-    workflow: { appliesTo: ['browser_job', 'ozon_seller_promotion_report'], text: `${promotionContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}` },
+    workflow: {
+        appliesTo: ['browser_job', 'ozon_seller_promotion_report'],
+        text: `${promotionContract.trimEnd()} ${authorizationEndGuidance} ${runningAnswerGuidance}`,
+    },
 };

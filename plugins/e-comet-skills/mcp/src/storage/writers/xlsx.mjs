@@ -27,11 +27,11 @@ for (let index = 0; index < CRC32_TABLE.length; index += 1) {
     CRC32_TABLE[index] = value >>> 0;
 }
 // Byte-at-a-time CRC and the pre-bounds zip64 extra read moved verbatim from the previous home; both
-// are slower than necessary with no user-visible difference: accepted residual, see docs/local-agent-architecture.md#accepted-residuals.
+// are slower than necessary with no user-visible difference: accepted residual, see docs/architecture/residuals/storage.md.
 const crc32 = (bytes) => {
     let value = 0xffffffff;
     for (const byte of bytes)
-        value = CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+        value = (CRC32_TABLE[(value ^ byte) & 0xff] ?? 0) ^ (value >>> 8);
     return (value ^ 0xffffffff) >>> 0;
 };
 const hasZip64Extra = (bytes, offset, length) => {
@@ -71,13 +71,14 @@ const splitXmlName = (name) => {
 };
 const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
 const XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/';
-// `undefined` (past the end of a string) is not a scalar: every comparison below is false for it.
-const isXmlScalar = (code) => code === 0x09 ||
-    code === 0x0a ||
-    code === 0x0d ||
-    (code >= 0x20 && code <= 0xd7ff) ||
-    (code >= 0xe000 && code <= 0xfffd) ||
-    (code >= 0x10000 && code <= 0x10ffff);
+// `undefined` (past the end of a string) is not a scalar.
+const isXmlScalar = (code) => code !== undefined &&
+    (code === 0x09 ||
+        code === 0x0a ||
+        code === 0x0d ||
+        (code >= 0x20 && code <= 0xd7ff) ||
+        (code >= 0xe000 && code <= 0xfffd) ||
+        (code >= 0x10000 && code <= 0x10ffff));
 const scanXmlReferences = (value, decode = false) => {
     const output = decode ? [] : undefined;
     let cursor = 0;
@@ -158,8 +159,10 @@ const scanXmlReferences = (value, decode = false) => {
         output.push(value.slice(plainStart));
     return output.join('');
 };
-const decodeXmlReferences = (value) => scanXmlReferences(value, true);
-const assertXmlReferences = (value) => void scanXmlReferences(value);
+const decodeXmlReferences = (value) => scanXmlReferences(value, true) ?? '';
+const assertXmlReferences = (value) => {
+    scanXmlReferences(value);
+};
 const parseXmlDocument = (source) => {
     if (source.charCodeAt(0) === 0xfeff)
         source = source.slice(1);
@@ -203,9 +206,8 @@ const parseXmlDocument = (source) => {
         cursor = end + 3;
     };
     const restoreNamespaces = (changes) => {
-        for (let index = changes.length - 1; index >= 0; index -= 1) {
-            const change = changes[index];
-            if (change.hadPrevious)
+        for (const change of [...changes].reverse()) {
+            if (change.hadPrevious && change.previous !== undefined)
                 namespaceScope.set(change.prefix, change.previous);
             else
                 namespaceScope.delete(change.prefix);
@@ -231,7 +233,7 @@ const parseXmlDocument = (source) => {
                 throw new Error('Invalid XML processing instruction');
             cursor += 2;
             const target = parseName();
-            if (cursor < end && !/[ \t\r\n]/u.test(source[cursor])) {
+            if (cursor < end && !/[ \t\r\n]/u.test(source[cursor] ?? '')) {
                 throw new Error('Invalid XML processing instruction');
             }
             if (target.toLowerCase() === 'xml')
@@ -268,11 +270,11 @@ const parseXmlDocument = (source) => {
             const qualifiedName = parseName();
             splitXmlName(qualifiedName);
             whitespace();
-            if (source[cursor] !== '>' || stack.length === 0 || stack.at(-1).qualifiedName !== qualifiedName) {
+            if (source[cursor] !== '>' || stack.at(-1)?.qualifiedName !== qualifiedName) {
                 throw new Error('Mismatched XML end tag');
             }
             cursor += 1;
-            restoreNamespaces(stack.pop().namespaceChanges);
+            restoreNamespaces(stack.pop()?.namespaceChanges ?? []);
             continue;
         }
         if (source.startsWith('<!', cursor))
@@ -380,7 +382,7 @@ const parseXmlDocument = (source) => {
             root = element;
         }
         else if (stack.length === 1) {
-            root.children.push(element);
+            root?.children.push(element);
         }
         if (selfClosing)
             restoreNamespaces(namespaceChanges);
@@ -395,9 +397,9 @@ const hasDirectElement = (root, namespaceUri, localName, predicate = (_element) 
 const attribute = (element, name) => element.attributes.get(`\u0000${name}`);
 // The three required parts are present: the caller checked them before decoding.
 const assertRequiredXlsxParts = (contents) => {
-    const contentTypes = parseXmlDocument(contents.get('[Content_Types].xml'));
-    const relationships = parseXmlDocument(contents.get('_rels/.rels'));
-    const workbook = parseXmlDocument(contents.get('xl/workbook.xml'));
+    const contentTypes = parseXmlDocument(contents.get('[Content_Types].xml') ?? '');
+    const relationships = parseXmlDocument(contents.get('_rels/.rels') ?? '');
+    const workbook = parseXmlDocument(contents.get('xl/workbook.xml') ?? '');
     if (contentTypes.namespaceUri !== CONTENT_TYPES_NAMESPACE ||
         contentTypes.localName !== 'Types' ||
         !hasDirectElement(contentTypes, CONTENT_TYPES_NAMESPACE, 'Override', (element) => attribute(element, 'PartName') === '/xl/workbook.xml' &&
@@ -534,9 +536,7 @@ export const assertXlsxPackage = (bytes, { maxFileBytes }) => {
                     bytes.readUInt32LE(dataEnd + 4) !== crc ||
                     bytes.readUInt32LE(dataEnd + 8) !== compressedSize ||
                     bytes.readUInt32LE(dataEnd + 12) !== uncompressedSize
-                : localCrc !== crc ||
-                    localCompressedSize !== compressedSize ||
-                    localUncompressedSize !== uncompressedSize) ||
+                : localCrc !== crc || localCompressedSize !== compressedSize || localUncompressedSize !== uncompressedSize) ||
             (method === 0 && compressedSize !== uncompressedSize)) {
             throw new Error('Artifact is not a valid XLSX ZIP package');
         }
@@ -562,7 +562,7 @@ export const assertXlsxPackage = (bytes, { maxFileBytes }) => {
     }
     ranges.sort((left, right) => left.start - right.start);
     if (offset !== endOffset ||
-        ranges.some((range, index) => index > 0 && ranges[index - 1].end > range.start) ||
+        ranges.some((range, index) => (ranges[index - 1]?.end ?? -Infinity) > range.start) ||
         [...XLSX_REQUIRED_PARTS].some((part) => !parts.has(part))) {
         throw new Error('Artifact ZIP does not contain the required XLSX workbook content');
     }

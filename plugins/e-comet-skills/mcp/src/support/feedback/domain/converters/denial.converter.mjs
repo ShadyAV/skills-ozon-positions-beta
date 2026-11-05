@@ -1,5 +1,6 @@
-import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, feedbackDiagnostics, safeFeedbackProperty } from '../../../../transport/failures/evidence.mjs';
+import { isOneOf } from '../../../../shared/values.mjs';
 import { ownedHandoffError as ownedErrors } from '../policies/handoff.policy.mjs';
+import { FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, feedbackDiagnostics, safeFeedbackProperty, } from '../../../../transport/failures/evidence.mjs';
 // The reason a denied call carries: the closed code, message and evidence, then the recovery for that code.
 export const denialReason = (error) => {
     const recovery = error.code === 'FEEDBACK_GRANT_REFRESH_REQUIRED'
@@ -12,11 +13,19 @@ export const denialReason = (error) => {
     return `${error.code}: ${error.message} ${JSON.stringify(error.details)} ` + recovery;
 };
 // The closed cause each denial code reports in its hook diagnostic record.
-export const FEEDBACK_DENIAL_CAUSES = Object.freeze({
+export const FEEDBACK_DENIAL_CAUSES = {
     ...Object.fromEntries(['FEEDBACK_INVALID_INPUT', 'FEEDBACK_MODEL_TRANSPORT'].map((code) => [code, 'invalid_input'])),
     ...Object.fromEntries(['FEEDBACK_INVALID_EVENT', 'FEEDBACK_INVALID_SESSION', 'FEEDBACK_EVENT_TOO_LARGE'].map((code) => [code, 'invalid_event'])),
-    ...Object.fromEntries(['FEEDBACK_INVALID_STATE', 'FEEDBACK_INVALID_GRANT', 'FEEDBACK_INVALID_PREPARED', 'FEEDBACK_CLAIM_INVALID',
-        'FEEDBACK_ARTIFACT_MISMATCH', 'FEEDBACK_PREPARED_MISMATCH', 'FEEDBACK_TOOL_MISMATCH', 'FEEDBACK_GRANT_CONFLICT'].map((code) => [code, 'invalid_state'])),
+    ...Object.fromEntries([
+        'FEEDBACK_INVALID_STATE',
+        'FEEDBACK_INVALID_GRANT',
+        'FEEDBACK_INVALID_PREPARED',
+        'FEEDBACK_CLAIM_INVALID',
+        'FEEDBACK_ARTIFACT_MISMATCH',
+        'FEEDBACK_PREPARED_MISMATCH',
+        'FEEDBACK_TOOL_MISMATCH',
+        'FEEDBACK_GRANT_CONFLICT',
+    ].map((code) => [code, 'invalid_state'])),
     ...Object.fromEntries(['FEEDBACK_GRANT_MISSING', 'FEEDBACK_PREPARED_MISSING'].map((code) => [code, 'missing'])),
     ...Object.fromEntries(['FEEDBACK_AMBIGUOUS_GRANT', 'FEEDBACK_AMBIGUOUS_PREPARED'].map((code) => [code, 'ambiguous'])),
     FEEDBACK_GRANT_REFRESH_REQUIRED: 'expired',
@@ -24,19 +33,23 @@ export const FEEDBACK_DENIAL_CAUSES = Object.freeze({
     FEEDBACK_STORAGE_ERROR: 'io_error',
     FEEDBACK_TRANSCRIPT_UNAVAILABLE: 'unsupported',
     FEEDBACK_INTERNAL_ERROR: 'internal_error',
-});
+};
 export const handoffFailure = (error, operation) => {
     const details = feedbackDiagnostics(error, operation);
     const owned = ownedErrors(error);
     if (owned)
         return { ...owned, details };
-    const filesystemBlocked = FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES.includes(details.systemCode);
+    const filesystemBlocked = isOneOf(FEEDBACK_DIAGNOSTIC_FILESYSTEM_CODES, details.systemCode);
     if (filesystemBlocked)
         return { code: 'FEEDBACK_STORAGE_ERROR', message: 'A local feedback filesystem operation could not complete.', details };
     if (safeFeedbackProperty(error, 'code') === 'FEEDBACK_CLAIM_INVALID') {
         return { code: 'FEEDBACK_CLAIM_INVALID', message: 'The trusted feedback handoff claim could not be verified.', details };
     }
-    return { code: 'FEEDBACK_INTERNAL_ERROR', message: 'The local feedback handoff failed internally.', details: { ...details, reason: 'internal_error' } };
+    return {
+        code: 'FEEDBACK_INTERNAL_ERROR',
+        message: 'The local feedback handoff failed internally.',
+        details: { ...details, reason: 'internal_error' },
+    };
 };
 // What a failed capture reports: the closed code, message and evidence.
 export const failureText = (failure) => `${failure.code}: ${failure.message} ${JSON.stringify(failure.details)}`;

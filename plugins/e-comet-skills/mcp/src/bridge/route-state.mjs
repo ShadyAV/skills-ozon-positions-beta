@@ -1,7 +1,7 @@
-import { diagnosticCheck } from '../transport/diagnostics/vocabulary.mjs';
 import { extensionLogCheck } from './profile/extension-log.mjs';
+import { diagnosticCheck } from '../transport/diagnostics/vocabulary.mjs';
 const iso = (value) => {
-    if (!Number.isFinite(value) || Math.abs(value) > 8.64e15)
+    if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > 8.64e15)
         return undefined;
     try {
         return new Date(value).toISOString();
@@ -10,7 +10,7 @@ const iso = (value) => {
         return undefined;
     }
 };
-// Parse boundary: `raw` is the session runtime's status record, read field by field.
+// `raw` is the session runtime's status record with the time of this observation.
 export const deriveBridgeDiagnostics = (raw) => {
     let state;
     // This snapshot has no task intent; recovery belongs to the selected typed operation.
@@ -20,7 +20,7 @@ export const deriveBridgeDiagnostics = (raw) => {
         state = 'extension_update_required';
     else if (raw.extensionConnected && raw.browserContext?.state !== 'known')
         state = 'extension_context_unknown';
-    else if (raw.extensionConnected && !raw.browserContext.wbTabConnected && !raw.browserContext.sellerTabConnected)
+    else if (raw.extensionConnected && !raw.browserContext?.wbTabConnected && !raw.browserContext?.sellerTabConnected)
         state = 'extension_connected_no_wb_tab';
     else if (raw.extensionConnected)
         state = 'ready';
@@ -43,20 +43,38 @@ export const deriveBridgeDiagnostics = (raw) => {
                 ? { ozonSellerPromotionReportSupported: raw.ozonSellerPromotionReportSupported }
                 : {}),
             ...(typeof raw.ozonSellerPromotionReportsSupported === 'boolean'
-                ? { ozonSellerPromotionReportsSupported: raw.ozonSellerPromotionReportsSupported } : {}),
+                ? { ozonSellerPromotionReportsSupported: raw.ozonSellerPromotionReportsSupported }
+                : {}),
             ...(typeof raw.ozonSellerAnalyticsReportSupported === 'boolean'
-                ? { ozonSellerAnalyticsReportSupported: raw.ozonSellerAnalyticsReportSupported } : {}),
+                ? { ozonSellerAnalyticsReportSupported: raw.ozonSellerAnalyticsReportSupported }
+                : {}),
             ...(typeof raw.ozonSearchPositionsSupported === 'boolean'
-                ? { ozonSearchPositionsSupported: raw.ozonSearchPositionsSupported } : {}),
+                ? { ozonSearchPositionsSupported: raw.ozonSearchPositionsSupported }
+                : {}),
         },
         browserContext: raw.browserContext ?? { state: 'unknown' },
         diagnostics: {
-            snapshot: diagnosticCheck({ check: 'snapshot', state: 'passed', observedAt, source: 'local_bridge_status', executionPlane: 'device' }),
-            routeFreshness: diagnosticCheck({ check: 'route_freshness', state: Number.isFinite(raw.routeLastObservedAtMs) ? 'passed' : 'unknown', observedAt,
-                source: 'extension_heartbeat', executionPlane: 'device',
-                ...(Number.isFinite(raw.routeLastObservedAtMs) ? { facts: { lastObservedAt: iso(raw.routeLastObservedAtMs) } } : { cause: 'unknown', nextCheck: 'observe_extension_heartbeat' }) }),
+            snapshot: diagnosticCheck({
+                check: 'snapshot',
+                state: 'passed',
+                observedAt,
+                source: 'local_bridge_status',
+                executionPlane: 'device',
+            }),
+            routeFreshness: diagnosticCheck({
+                check: 'route_freshness',
+                state: Number.isFinite(raw.routeLastObservedAtMs) ? 'passed' : 'unknown',
+                observedAt,
+                source: 'extension_heartbeat',
+                executionPlane: 'device',
+                ...(Number.isFinite(raw.routeLastObservedAtMs)
+                    ? { facts: { lastObservedAt: iso(raw.routeLastObservedAtMs) } }
+                    : { cause: 'unknown', nextCheck: 'observe_extension_heartbeat' }),
+            }),
             // Kept from the last tool call that found no broker; its ages count to this observation.
-            ...(raw.extensionLog ? { extensionLog: extensionLogCheck(raw.extensionLog, { observedAt, nowMs: Date.parse(observedAt) }) } : {}),
+            ...(raw.extensionLog
+                ? { extensionLog: extensionLogCheck(raw.extensionLog, { observedAt, nowMs: Date.parse(observedAt) }) }
+                : {}),
         },
     };
 };

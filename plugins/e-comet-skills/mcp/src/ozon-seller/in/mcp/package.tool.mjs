@@ -1,8 +1,6 @@
+import { invalidArgumentsMessage, validateArguments } from '../../../mcp-protocol/registry/validate.mjs';
 import { deliverReportResult } from '../../../mcp-protocol/results/links.mjs';
 import { textResult } from '../../../mcp-protocol/results/serialize.mjs';
-import { invalidArgumentsMessage, validateArguments } from '../../../mcp-protocol/registry/validate.mjs';
-import { ToolExecutionError } from '../../../shared/coded-error.mjs';
-import { StorageUnavailableError } from '../../../shared/storage-unavailable.mjs';
 import { executeOzonAnalyticsJob, safeOzonAnalyticsToolError } from '../../application/analytics.mjs';
 import { getOzonReportPackageArtifactResources } from '../../application/package.mjs';
 import { executeOzonPromotionPackageJob } from '../../application/promotion.mjs';
@@ -13,11 +11,14 @@ import { rejectedOzonPackage } from '../../domain/converters/package-result.conv
 import { parseAnalyticsDateRange } from '../../domain/policies/analytics.policy.mjs';
 import { parsePromotionPeriods } from '../../domain/policies/package.policy.mjs';
 import { releaseAuthorizationInBackground } from './authorize.mjs';
+import { ToolExecutionError } from '../../../shared/coded-error.mjs';
+import { StorageUnavailableError } from '../../../shared/storage-unavailable.mjs';
+import { isRecord } from '../../../shared/values.mjs';
 // The two report packages: ozon_seller_promotion_reports over periods and ozon_seller_analytics_report over reports.
-const PACKAGE_TOOLS = Object.freeze({
+const PACKAGE_TOOLS = {
     promotion: { toolName: 'ozon_seller_promotion_reports', contract: promotionContract },
     analytics: { toolName: 'ozon_seller_analytics_report', contract: analyticsContract },
-});
+};
 /**
  * A report package of `family`. Keep package admission/result shaping distinct from the released singular contract:
  * valid pre-execution failures preserve item order/cardinality and a package stopReason, while singular errors retain
@@ -25,14 +26,17 @@ const PACKAGE_TOOLS = Object.freeze({
  * publication and release pins after the terminal response; neither waits for the extension to acknowledge lease
  * cleanup.
  */
-export const createPackageTool = ({ family, answer, authorize, ozonPackage, artifacts, withDownloadedUpdate, renderOzonResult, reportOutputDirectory, now, foreignJobs }) => {
+export const createPackageTool = ({ family, answer, authorize, ozonPackage, artifacts, withDownloadedUpdate, renderOzonResult, reportOutputDirectory, now, foreignJobs, }) => {
     const { toolName, contract } = PACKAGE_TOOLS[family];
     return {
         needsBridge: true,
         // Parse boundary: the call's arguments, checked against the contract first.
         run: async (id, args = {}) => {
             const itemProperty = family === 'promotion' ? 'periods' : 'reports';
-            const items = args?.[itemProperty];
+            const input = isRecord(args) ? args : {};
+            const listed = input[itemProperty];
+            // The contract admits only item objects; the list is read after it passed.
+            const items = Array.isArray(listed) ? listed.filter(isRecord) : [];
             // One byte counter per call: every writer of this export shares it (spec §4.2).
             const jobBudget = { bytes: 0 };
             let authorizationLease;
@@ -45,8 +49,13 @@ export const createPackageTool = ({ family, answer, authorize, ozonPackage, arti
                 }
                 try {
                     const safe = family === 'analytics' ? safeOzonAnalyticsToolError(error) : safeOzonPromotionToolError(error);
-                    return { code: safe.code, message: safe.message, stage: safe.stage, retryable: false,
-                        ...(safe.details === undefined ? {} : { details: safe.details }) };
+                    return {
+                        code: safe.code,
+                        message: safe.message,
+                        stage: safe.stage,
+                        retryable: false,
+                        ...(safe.details === undefined ? {} : { details: safe.details }),
+                    };
                 }
                 catch {
                     return {
@@ -62,16 +71,10 @@ export const createPackageTool = ({ family, answer, authorize, ozonPackage, arti
                     return { ok: false, status: 'failed', jobType: toolName, error: safeFailure(error), stopReason: null };
                 }
                 // Parse boundary: an item as the caller gave it.
-                const safeItem = (item) => ({
-                    ...(typeof item?.dateFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateFrom)
-                        ? { dateFrom: item.dateFrom }
-                        : {}),
-                    ...(typeof item?.dateTo === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dateTo)
-                        ? { dateTo: item.dateTo }
-                        : {}),
-                    ...(family === 'analytics' && (item?.breakdown === 'period' || item?.breakdown === 'daily')
-                        ? { breakdown: item.breakdown }
-                        : {}),
+                const safeItem = ({ dateFrom, dateTo, breakdown }) => ({
+                    ...(typeof dateFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) ? { dateFrom } : {}),
+                    ...(typeof dateTo === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? { dateTo } : {}),
+                    ...(family === 'analytics' && (breakdown === 'period' || breakdown === 'daily') ? { breakdown } : {}),
                 });
                 const result = rejectedOzonPackage(toolName, itemProperty, items.map(safeItem), safeFailure(error));
                 if (isOzonPackageCapabilityFailure(error))
@@ -92,7 +95,7 @@ export const createPackageTool = ({ family, answer, authorize, ozonPackage, arti
                     throw new ToolExecutionError('PREFLIGHT_FAILED', `The Ozon ${family} report package is invalid.`, 'preflight', false);
                 }
                 argumentsValid = true;
-                authorizationLease = await authorize.authorizeOzonPackage(family, args.triggerUrl, () => artifacts.requireTarget());
+                authorizationLease = await authorize.authorizeOzonPackage(family, input.triggerUrl, () => artifacts.requireTarget());
                 const lease = authorizationLease;
                 const sharedExecution = {
                     authorization: authorizationLease.authorization,
@@ -113,9 +116,7 @@ export const createPackageTool = ({ family, answer, authorize, ozonPackage, arti
                 terminalResult = textResult(failedPackage(await withDownloadedUpdate(error, isOzonPackageCapabilityFailure(error))), true);
             }
             finally {
-                const currentLease = authorizationLease;
-                authorizationLease = undefined;
-                releaseAuthorizationInBackground(currentLease, `after Ozon ${family} report package completion`);
+                releaseAuthorizationInBackground(authorizationLease, `after Ozon ${family} report package completion`);
             }
             answer(id, await deliverReportResult(terminalResult, reportArtifacts, reportOutputDirectory));
         },

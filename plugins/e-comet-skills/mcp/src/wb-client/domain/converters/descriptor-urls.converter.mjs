@@ -34,9 +34,11 @@ export const buildFiltersDescriptorUrl = (job, query, filterKeys) => {
     return url.toString();
 };
 export const fillTemplate = (template, article) => template.replace(/\{(\w+)\}/g, (_match, key) => {
-    const value = Object.prototype.hasOwnProperty.call(article, key) ? article[key] : undefined;
+    const value = Object.hasOwn(article, key) ? article[key] : undefined;
     if (value === undefined || value === null || String(value).length === 0)
         throw new Error('Browser job article does not provide a value for the endpoint template');
     return encodeURIComponent(String(value));
 });
-export const normalizeProductArticles = (articles) => [...new Map(articles.map((article) => [article.nm, article])).values()];
+export const normalizeProductArticles = (articles) => [
+    ...new Map(articles.map((article) => [article.nm, article])).values(),
+];

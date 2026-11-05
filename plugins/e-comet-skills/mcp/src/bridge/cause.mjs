@@ -3,13 +3,14 @@
 // Each cause carries the one step the seller can take (spec §8), so the agent never has to guess one.
 import { existsSync, readFileSync } from 'node:fs';
 import { win32 } from 'node:path';
-import { BRIDGE_CODES, BRIDGE_IDENTIFIER } from '../transport/diagnostics/bridge-codes.mjs';
 import { isNativeCapableVersion } from './profile/extension-install.mjs';
 import { NATIVE_HOST_NAME } from '../native-framing.mjs';
 import { ToolExecutionError } from '../shared/coded-error.mjs';
+import { isOneOf, isRecord } from '../shared/values.mjs';
+import { BRIDGE_CODES, BRIDGE_IDENTIFIER } from '../transport/diagnostics/bridge-codes.mjs';
 // English agent texts condensed from spec §8 "Seller-facing action". Russian UI labels are quoted as the browser shows
 // them; {browser} is filled with the browser the cause names, or "the browser". Each fits 400 characters filled in.
-export const BRIDGE_ACTIONS = Object.freeze({
+export const BRIDGE_ACTIONS = {
     // The store link does not fit beside the puzzle-button hint in 400 characters, so the store is named instead.
     BRIDGE_NO_BROWSER: "Ask the user to open {browser} on the agent's computer with the e-Comet extension (install it from the Chrome Web Store if missing), " +
         'click the e-Comet icon (under the Extensions puzzle button if it is not pinned), accept the permission under ' +
@@ -17,7 +18,7 @@ export const BRIDGE_ACTIONS = Object.freeze({
         'restart the browser; then report it.',
     // The browser runs, so opening it cannot help; a click opens the popup, which restarts the extension's search. The
     // front's support chat can attach the extension's log (Chatwoot setLogFileCallback), which a report from here cannot.
-    BRIDGE_HOST_NOT_STARTED: "e-Comet is enabled in {browser}, which is running, but its local connector has not started. Ask the user to click the " +
+    BRIDGE_HOST_NOT_STARTED: 'e-Comet is enabled in {browser}, which is running, but its local connector has not started. Ask the user to click the ' +
         'e-Comet icon in the profile where it is installed (open that profile if it is closed) and repeat the request. If it still ' +
         "fails, offer to report it and ask the user to also message e-Comet support in that profile's app.e-comet.io chat, which can " +
         "attach the extension's log.",
@@ -28,7 +29,7 @@ export const BRIDGE_ACTIONS = Object.freeze({
         'report it to e-Comet.',
     BRIDGE_HOST_FORBIDDEN: "{browser} refuses to start e-Comet's local connector for this copy of the e-Comet extension: either this " +
         'copy is not from the Chrome Web Store, or this is an e-Comet defect. Repeating the request will not help; offer to report it to e-Comet.',
-    // Accepted residual "A broker that fails before its own code runs": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "A broker that fails before its own code runs": docs/architecture/residuals/native-bridge.md.
     // The extension pauses after failed starts until an icon click or a browser start, so a plain repeat cannot wake it.
     BRIDGE_HOST_START_FAILED: "{browser} tried to start e-Comet's local connector, but something on this computer stopped it before it " +
         'ran. Ask the user which security program is installed and to check its quarantine or blocked list for e-Comet, then click ' +
@@ -38,11 +39,11 @@ export const BRIDGE_ACTIONS = Object.freeze({
     BRIDGE_BROKER_NOT_VISIBLE: "e-Comet's local connector last answered in {browser}, but this agent cannot reach it. Ask the user to click " +
         'the e-Comet icon in the profile where it is installed (open that profile if it is closed) and repeat the request. If it still ' +
         'fails, the connector may run under another user account or app on this computer: offer to report it to e-Comet.',
-    // Accepted residual "Chrome disables the extension until the permission is accepted": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "Chrome disables the extension until the permission is accepted": docs/architecture/residuals/native-bridge.md.
     BRIDGE_PERMISSION_REQUIRED: 'e-Comet stays off in {browser} until the user accepts its new permission. Ask the user to press ' +
         '«Требуется действие» right of the address bar (or the ⋮ menu) → «Расширение "e-Comet" отключено» → «Разрешить», then ' +
         'repeat the request. Turning e-Comet on at chrome://extensions, edge://extensions or browser://extensions asks for the same permission.',
-    // Accepted residual "An extension update not yet applied when the plugin arrives": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "An extension update not yet applied when the plugin arrives": docs/architecture/residuals/native-bridge.md.
     BRIDGE_EXTENSION_OUTDATED: 'The e-Comet extension in the browser is too old for this plugin. Ask the user to apply the extension ' +
         'update offered on app.e-comet.io or restart the browser, press «Разрешить» when the browser asks for the new permission ' +
         'under «Требуется действие», and repeat the request. Report it to e-Comet if the version stays old.',
@@ -70,40 +71,58 @@ export const BRIDGE_ACTIONS = Object.freeze({
         'Windows; in Codex Desktop, turn off running the agent in WSL.',
     BRIDGE_UNSUPPORTED_PLATFORM: 'The agent runs on an operating system where e-Comet cannot reach a browser. Ask the user to use ' +
         'the agent on Windows, macOS or Linux.',
-});
+};
 // A cause a fact narrows further has its own text: an invalid ComSpec is the administrator's to fix, not unknown, and a
 // policy that could not be read stays a possible cause of a connector that never started.
-export const BRIDGE_DETAIL_ACTIONS = Object.freeze({
-    BRIDGE_HOST_NOT_STARTED: Object.freeze({
-        policy_unread: "e-Comet is enabled in {browser}, which is running, but its local connector has not started; an administrator " +
+export const BRIDGE_DETAIL_ACTIONS = {
+    BRIDGE_HOST_NOT_STARTED: {
+        policy_unread: 'e-Comet is enabled in {browser}, which is running, but its local connector has not started; an administrator ' +
             'policy on this computer may block it (it could not be read). Ask the user to click the e-Comet icon in the profile where ' +
-            "it is installed and repeat the request. If it still fails, offer to report it and ask the user to also message e-Comet " +
+            'it is installed and repeat the request. If it still fails, offer to report it and ask the user to also message e-Comet ' +
             "support in that profile's app.e-comet.io chat.",
-    }),
-    BRIDGE_HOST_START_FAILED: Object.freeze({
+    },
+    BRIDGE_HOST_START_FAILED: {
         comspec: "Windows cannot start e-Comet's local connector for {browser}: the ComSpec environment variable does not point to " +
             'cmd.exe. This is not an e-Comet or user fault: whoever manages the computer can restore ComSpec to ' +
             '%SystemRoot%\\System32\\cmd.exe, then restart {browser} and the agent app and repeat the request.',
-    }),
-});
+    },
+};
 // Failures with no supported user step, and setups the user cannot change in place: repeating the request cannot help.
-const FINAL_CODES = new Set(['BRIDGE_BROKER_FAILED', 'BRIDGE_UNAVAILABLE_IN_WSL', 'BRIDGE_UNSUPPORTED_PLATFORM', 'BRIDGE_FRAME_TOO_LARGE',
-    'BRIDGE_HOST_NOT_FOUND', 'BRIDGE_HOST_FORBIDDEN']);
-const BROWSER_NAMES = Object.freeze({ chrome: 'Google Chrome', edge: 'Microsoft Edge', brave: 'Brave', yandex: 'Yandex Browser', opera: 'Opera' });
+const FINAL_CODES = new Set([
+    'BRIDGE_BROKER_FAILED',
+    'BRIDGE_UNAVAILABLE_IN_WSL',
+    'BRIDGE_UNSUPPORTED_PLATFORM',
+    'BRIDGE_FRAME_TOO_LARGE',
+    'BRIDGE_HOST_NOT_FOUND',
+    'BRIDGE_HOST_FORBIDDEN',
+]);
+// Every closed cause has its text in BRIDGE_ACTIONS.
+const isActionCode = (value) => isOneOf(BRIDGE_CODES, value);
+const BROWSER_NAMES = {
+    chrome: 'Google Chrome',
+    edge: 'Microsoft Edge',
+    brave: 'Brave',
+    yandex: 'Yandex Browser',
+    opera: 'Opera',
+};
 /**
  * The tool error for a cause. A code that is no closed cause becomes BRIDGE_NO_BROWSER, which claims nothing more than
  * that no broker answered; a browser outside the probe's list is not named. `refusal` is a closed refusal code the
  * caller validated, and UNKNOWN without one. `step` and `systemCode` name a failed registration step or broker failure
  * record; a value that is no short identifier becomes UNKNOWN. `detail` picks the code's narrower text when it has one.
  */
-export function bridgeCauseError({ code, browser, refusal = 'UNKNOWN', detail = undefined, step = undefined, systemCode = undefined } = {}) {
-    const known = BRIDGE_CODES.includes(code) ? code : 'BRIDGE_NO_BROWSER';
-    const name = Object.hasOwn(BROWSER_NAMES, browser) ? BROWSER_NAMES[browser] : 'the browser';
+export function bridgeCauseError({ code, browser, refusal = 'UNKNOWN', detail = undefined, step = undefined, systemCode = undefined, } = {}) {
+    const known = isActionCode(code) ? code : 'BRIDGE_NO_BROWSER';
+    const name = (typeof browser === 'string' && Object.hasOwn(BROWSER_NAMES, browser) ? BROWSER_NAMES[browser] : undefined) ?? 'the browser';
     const details = BRIDGE_DETAIL_ACTIONS;
-    const narrower = detail !== undefined && Object.hasOwn(details, known) && Object.hasOwn(details[known], detail) ? details[known][detail] : undefined;
+    const forCode = Object.hasOwn(details, known) ? details[known] : undefined;
+    const narrower = detail !== undefined && forCode && Object.hasOwn(forCode, detail) ? forCode[detail] : undefined;
     const identifier = (value) => (typeof value === 'string' && BRIDGE_IDENTIFIER.test(value) ? value : 'UNKNOWN');
-    const text = (narrower ?? BRIDGE_ACTIONS[known]).replaceAll('{browser}', name).replace('{refusal}', refusal)
-        .replace('{step}', identifier(step)).replace('{code}', identifier(systemCode));
+    const text = (narrower ?? BRIDGE_ACTIONS[known])
+        .replaceAll('{browser}', name)
+        .replace('{refusal}', refusal)
+        .replace('{step}', identifier(step))
+        .replace('{code}', identifier(systemCode));
     return new ToolExecutionError(known, text, 'local', !FINAL_CODES.has(known));
 }
 /**
@@ -112,7 +131,7 @@ export function bridgeCauseError({ code, browser, refusal = 'UNKNOWN', detail = 
  * This process sees its host's environment, not the browser's, and a host may leave ComSpec out: an absent value is
  * `unknown`, never `invalid`, which only a value naming something other than an existing cmd.exe is.
  */
-export function readComspecState({ platform = process.platform, env = process.env, exists = existsSync } = {}) {
+export function readComspecState({ platform = process.platform, env = process.env, exists = existsSync, } = {}) {
     if (platform !== 'win32')
         return 'not_applicable';
     const name = Object.keys(env).find((key) => key.toUpperCase() === 'COMSPEC');
@@ -121,12 +140,12 @@ export function readComspecState({ platform = process.platform, env = process.en
         return 'unknown';
     return win32.isAbsolute(value) && /(?:^|[\\/])cmd\.exe$/i.test(value) && exists(value) ? 'valid' : 'invalid';
 }
-// Accepted residual "Agents inside WSL lose live data": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Agents inside WSL lose live data": docs/architecture/residuals/native-bridge.md.
 /**
  * Registration covers Windows, macOS and Linux. WSL is read from /proc, never from environment variables, which Codex
  * filters out of a server's environment.
  */
-export function detectPlatformCause({ platform = process.platform, readFile = (path) => readFileSync(path, 'utf8'), exists = existsSync } = {}) {
+export function detectPlatformCause({ platform = process.platform, readFile = (path) => readFileSync(path, 'utf8'), exists = existsSync, } = {}) {
     if (platform === 'win32' || platform === 'darwin')
         return null;
     if (platform !== 'linux')
@@ -141,16 +160,21 @@ export function detectPlatformCause({ platform = process.platform, readFile = (p
     return /microsoft/i.test(version) || exists('/proc/sys/fs/binfmt_misc/WSLInterop') ? 'BRIDGE_UNAVAILABLE_IN_WSL' : null;
 }
 const RANKS = ['ready', 'permission', 'outdated', 'disabled', 'unknown'];
-// Parse boundary: probe facts and policies are records a probe built from browser files; read field by field.
+const isInstall = (value) => isRecord(value) && typeof value.browser === 'string' && Array.isArray(value.profiles) && value.profiles.every(isRecord);
 const rankOf = (profile) => {
     if (profile.state === 'enabled')
         return isNativeCapableVersion(profile.version) ? 'ready' : profile.version ? 'outdated' : 'unknown';
     if (profile.state === 'disabled')
-        return profile.permissionsIncrease && profile.disableReasons?.length === 1 ? 'permission' : 'disabled';
+        return profile.permissionsIncrease && Array.isArray(profile.disableReasons) && profile.disableReasons.length === 1
+            ? 'permission'
+            : 'disabled';
     return 'unknown';
 };
-const installsOf = (probe) => (Array.isArray(probe?.facts?.browsers) ? probe.facts.browsers : []);
-const recency = (profile) => profile.lastUsedDaysAgo ?? Infinity;
+const installsOf = (probe) => {
+    const browsers = isRecord(probe) && isRecord(probe.facts) ? probe.facts.browsers : undefined;
+    return Array.isArray(browsers) ? browsers.filter(isInstall) : [];
+};
+const recency = (profile) => (typeof profile.lastUsedDaysAgo === 'number' ? profile.lastUsedDaysAgo : Infinity);
 // The most recently used profile where the extension is enabled, otherwise the most recently used one with an install.
 const judgedProfile = (profiles) => {
     const byRecency = [...profiles].sort((a, b) => recency(a) - recency(b));
@@ -169,12 +193,15 @@ const admits = (policy, browser) => {
 // When the probe saw the browser start, in ms; NaN when it is not seen running.
 const startedAt = (probe, browser) => {
     const install = installsOf(probe).find((item) => item.browser === browser);
-    return install?.running === true ? Date.parse(install.runningSince) : NaN;
+    return install?.running === true ? Date.parse(String(install.runningSince)) : NaN;
 };
 // Each browser with an install, ranked by its judged profile; among equal ranks a running browser goes first, and the
 // rest keep the probe's browser order.
 const judgedBrowsers = (probe) => installsOf(probe)
-    .flatMap(({ browser, profiles, running }) => (profiles.length > 0 ? [{ browser, rank: rankOf(judgedProfile(profiles)), running: running === true }] : []))
+    .flatMap(({ browser, profiles, running }) => {
+    const profile = judgedProfile(profiles);
+    return profile ? [{ browser, rank: rankOf(profile), running: running === true }] : [];
+})
     .sort((a, b) => RANKS.indexOf(a.rank) - RANKS.indexOf(b.rank) || Number(b.running) - Number(a.running));
 /**
  * The browser a cause names for a ready install: the first ready browser whose policy admits the host, else one whose
@@ -183,7 +210,8 @@ const judgedBrowsers = (probe) => installsOf(probe)
  */
 export function chosenBrowser({ probe, policy = null }) {
     const ready = judgedBrowsers(probe).filter(({ rank }) => rank === 'ready');
-    return (ready.find(({ browser }) => admits(policy, browser) === true) ?? ready.find(({ browser }) => admits(policy, browser) === null))?.browser;
+    return (ready.find(({ browser }) => admits(policy, browser) === true) ?? ready.find(({ browser }) => admits(policy, browser) === null))
+        ?.browser;
 }
 // A browser's extension starts its broker within this long of the browser starting, as after a manifest write.
 const WAIT_WINDOW_MS = 30_000;
@@ -198,14 +226,18 @@ const START_FAILURE_CLASSES = new Set(['host_exited', 'start_failed', 'communica
  * gives (open it), and a browser restarted since the log was read has not written them. The probe's time is used, not the
  * one read with the log, because status keeps the log while the background refreshes the probe.
  */
-const logCause = (log, { since, started, entries, failureRecords, lastConnect, now, comspec }) => {
+const logCause = (log, { since, started, entries, failureRecords, lastConnect, now, comspec, }) => {
     // A profile closed in a running browser writes no row (stand, Chrome 156): its rows explain nothing today, and the
     // fallback's step opens that profile.
     if (log.profileOpen === false && Number.isFinite(started))
         return null;
     // A close that a later handshake followed is over: the connector answered since (stand, Chrome 156).
-    const close = log.lastClose && !(log.lastHandshakeAtMs > log.lastClose.atMs) ? log.lastClose : undefined;
-    if ((log.refusedAtMs !== undefined && !(log.lastHandshakeAtMs > log.refusedAtMs)) || (close?.class === 'host_forbidden' && close.atMs > since)) {
+    // An absent time compares as NaN: never after anything, and nothing is after it.
+    const handshakeAtMs = log.lastHandshakeAtMs ?? NaN;
+    const close = log.lastClose && !(handshakeAtMs > log.lastClose.atMs) ? log.lastClose : undefined;
+    const closeAtMs = close?.atMs ?? NaN;
+    if ((log.refusedAtMs !== undefined && !(handshakeAtMs > log.refusedAtMs)) ||
+        (close?.class === 'host_forbidden' && close.atMs > since)) {
         return { code: 'BRIDGE_HOST_FORBIDDEN' };
     }
     if (!Number.isFinite(started))
@@ -217,20 +249,24 @@ const logCause = (log, { since, started, entries, failureRecords, lastConnect, n
     // it is current once the registration had stayed unchanged longer than the extension's 15 s search interval when the
     // log was read: status keeps a read, and a later clock would settle a streak no search was seen to leave open.
     // Accepted residual "BRIDGE_HOST_NOT_FOUND and the settled FORBIDDEN arm assume the extension's worker stays alive":
-    // docs/local-agent-architecture.md#accepted-residuals.
-    const settledStreak = log.streak?.open && close?.atMs > started && (log.readAtMs ?? now) - since >= HOST_NOT_FOUND_SETTLE_MS;
-    if (settledStreak && close.class === 'host_forbidden')
+    // docs/architecture/residuals/native-bridge.md.
+    const settledStreak = log.streak?.open && closeAtMs > started && (log.readAtMs ?? now) - since >= HOST_NOT_FOUND_SETTLE_MS;
+    if (settledStreak && close?.class === 'host_forbidden')
         return { code: 'BRIDGE_HOST_FORBIDDEN' };
-    // Accepted residual "A settled not-found streak outranks an unread policy": docs/local-agent-architecture.md#accepted-residuals.
-    if (settledStreak && close.class === 'host_not_found')
+    // Accepted residual "A settled not-found streak outranks an unread policy": docs/architecture/residuals/native-bridge.md.
+    if (settledStreak && close?.class === 'host_not_found')
         return { code: 'BRIDGE_HOST_NOT_FOUND' };
-    // Accepted residual "A security program that removes a connector file": docs/local-agent-architecture.md#accepted-residuals.
-    if (close && START_FAILURE_CLASSES.has(close.class) && !close.handshaken && close.atMs > Math.max(since, started)
-        && entries.length === 0 && failureRecords.length === 0) {
+    // Accepted residual "A security program that removes a connector file": docs/architecture/residuals/native-bridge.md.
+    if (close &&
+        START_FAILURE_CLASSES.has(close.class) &&
+        !close.handshaken &&
+        close.atMs > Math.max(since, started) &&
+        entries.length === 0 &&
+        failureRecords.length === 0) {
         return { code: 'BRIDGE_HOST_START_FAILED', ...(comspec === 'invalid' ? { detail: 'comspec' } : {}) };
     }
     // A handshake no close followed: the browser's connector runs, yet this process finds no broker it can use.
-    if (log.lastHandshakeAtMs > started && !(close?.atMs >= log.lastHandshakeAtMs) && (entries.length === 0 || lastConnect?.ok === false)) {
+    if (handshakeAtMs > started && !(closeAtMs >= handshakeAtMs) && (entries.length === 0 || lastConnect?.ok === false)) {
         return { code: 'BRIDGE_BROKER_NOT_VISIBLE' };
     }
     return null;
@@ -240,7 +276,7 @@ const logCause = (log, { since, started, entries, failureRecords, lastConnect, n
  * session; the cut at the newest live entry and the manifest write is repeated here against the facts passed in.
  * `extensionLog` is the extension's own log read from disk; `comspec` narrows a start failure on Windows.
  */
-export function chooseBridgeCause({ platformCause, registration, policy, probe, entries = [], failureRecords = [], lastConnect, now = Date.now(), extensionLog = null, comspec = 'not_applicable' }) {
+export function chooseBridgeCause({ platformCause, registration, policy, probe, entries = [], failureRecords = [], lastConnect, now = Date.now(), extensionLog = null, comspec = 'not_applicable', }) {
     if (platformCause)
         return { code: platformCause };
     if (registration?.state === 'denied')
@@ -252,8 +288,11 @@ export function chooseBridgeCause({ platformCause, registration, policy, probe, 
     const record = failureRecords.find((failure) => failure.at > settledAt && (nativeReady(probe) || failure.at > verifiedAt));
     const failed = registration?.state === 'failed' ? registration.error : record;
     if (registration?.state === 'failed' || record) {
-        return { code: 'BRIDGE_BROKER_FAILED', ...(typeof failed?.name === 'string' ? { step: failed.name } : {}),
-            ...(typeof failed?.code === 'string' ? { systemCode: failed.code } : {}) };
+        return {
+            code: 'BRIDGE_BROKER_FAILED',
+            ...(typeof failed?.name === 'string' ? { step: failed.name } : {}),
+            ...(typeof failed?.code === 'string' ? { systemCode: failed.code } : {}),
+        };
     }
     if (entries.length > 0 && lastConnect?.reason === 'unresponsive')
         return { code: 'BRIDGE_BROKER_UNRESPONSIVE' };
@@ -269,12 +308,20 @@ export function chooseBridgeCause({ platformCause, registration, policy, probe, 
         }
         if (extensionLog?.browser === chosen) {
             const since = registration?.verifiedSinceMs ?? -Infinity;
-            const logged = logCause(extensionLog, { since, started: startedAt(probe, chosen), entries, failureRecords, lastConnect, now, comspec });
+            const logged = logCause(extensionLog, {
+                since,
+                started: startedAt(probe, chosen),
+                entries,
+                failureRecords,
+                lastConnect,
+                now,
+                comspec,
+            });
             if (logged)
                 return { ...logged, browser: chosen };
         }
         // Running that long without an entry, its extension had the time to start the broker: opening it cannot help.
-        // Accepted residual "A broker that fails before its own code runs": docs/local-agent-architecture.md#accepted-residuals.
+        // Accepted residual "A broker that fails before its own code runs": docs/architecture/residuals/native-bridge.md.
         const notStarted = entries.length === 0 && now - startedAt(probe, chosen) >= WAIT_WINDOW_MS;
         if (notStarted && admits(policy, chosen) === null)
             return { code: 'BRIDGE_HOST_NOT_STARTED', browser: chosen, detail: 'policy_unread' };
@@ -284,24 +331,27 @@ export function chooseBridgeCause({ platformCause, registration, policy, probe, 
         return named('BRIDGE_PERMISSION_REQUIRED');
     // OUTDATED and DISABLED speak for every install, so they need a probe that read every profile it found.
     const profiles = browsers.flatMap((browser) => browser.profiles);
-    const complete = probe?.state === 'passed';
-    if (best?.rank === 'outdated' && complete && !profiles.some((profile) => isNativeCapableVersion(profile.version) || rankOf(profile) === 'unknown')) {
+    const complete = isRecord(probe) && probe.state === 'passed';
+    if (best?.rank === 'outdated' &&
+        complete &&
+        !profiles.some((profile) => isNativeCapableVersion(profile.version) || rankOf(profile) === 'unknown')) {
         return named('BRIDGE_EXTENSION_OUTDATED');
     }
     if (best?.rank === 'disabled' && complete && profiles.every((profile) => rankOf(profile) === 'disabled'))
         return named('BRIDGE_EXTENSION_DISABLED');
     return named('BRIDGE_NO_BROWSER');
 }
-// Accepted residual "Broker restarts with the extension": docs/local-agent-architecture.md#accepted-residuals.
+// Accepted residual "Broker restarts with the extension": docs/architecture/residuals/native-bridge.md.
 /**
  * Whether a broker is about to appear (spec §5.7): an install is enabled on a native-capable build, and the manifest was
  * written, this process's session ended or a browser with such an install whose policy admits our host started less than
  * 30 s ago (a first registration, an extension update, a browser restart).
  */
-export function shouldWaitForBroker({ probe, policy, registration, lastSessionEndAtMs, now }) {
-    const recent = (at) => Number.isFinite(at) && now - at < WAIT_WINDOW_MS;
+export function shouldWaitForBroker({ probe, policy, registration, lastSessionEndAtMs, now, }) {
+    const recent = (at) => typeof at === 'number' && Number.isFinite(at) && now - at < WAIT_WINDOW_MS;
     // A policy that could not be read is not a block: the broker may still be about to appear.
-    const starting = installsOf(probe).some(({ browser, profiles }) => profiles.some((profile) => rankOf(profile) === 'ready')
-        && admits(policy, browser) !== false && recent(startedAt(probe, browser)));
+    const starting = installsOf(probe).some(({ browser, profiles }) => profiles.some((profile) => rankOf(profile) === 'ready') &&
+        admits(policy, browser) !== false &&
+        recent(startedAt(probe, browser)));
     return nativeReady(probe) && (recent(registration?.manifestWrittenAtMs) || recent(lastSessionEndAtMs) || starting);
 }

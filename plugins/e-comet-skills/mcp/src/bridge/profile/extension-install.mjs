@@ -2,19 +2,19 @@ import fs from 'node:fs/promises';
 import { homedir, uptime as osUptime } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { compareBrokerVersions } from '../registration.mjs';
-import { NATIVE_EXTENSION_MIN_VERSION } from '../../transport/extension/identity.mjs';
-import { EXTENSION_INSTALL_VOCABULARY } from '../../transport/diagnostics/facts.mjs';
-import { diagnosticCheck } from '../../transport/diagnostics/vocabulary.mjs';
-import { safeExtensionVersion } from '../../transport/failures/vocabulary.mjs';
-import { extensionInstallFactsSchema } from '../../transport/diagnostics/facts.mjs';
 import { validateSchemaValue } from '../../shared/schema-validate.mjs';
-import { isRecord } from '../../shared/values.mjs';
+import { isOneOf, isRecord } from '../../shared/values.mjs';
+import { EXTENSION_INSTALL_VOCABULARY } from '../../transport/diagnostics/facts.mjs';
+import { extensionInstallFactsSchema } from '../../transport/diagnostics/facts.mjs';
+import { diagnosticCheck } from '../../transport/diagnostics/vocabulary.mjs';
+import { NATIVE_EXTENSION_MIN_VERSION } from '../../transport/extension/identity.mjs';
+import { safeExtensionVersion } from '../../transport/failures/vocabulary.mjs';
 export const EXTENSION_ID = 'apeallgchpgibifmbgefkhifidihmodh';
 // Chromium extensions/browser/disable_reason.h: DISABLE_USER_ACTION = 1 << 0, DISABLE_PERMISSIONS_INCREASE = 1 << 1,
 // DISABLE_RELOAD = 1 << 2. Read from the header; a real profile with this reason is still to be captured
 // (tests/owners/bridge/profile/fixtures/secure-preferences/README.md).
 export const DISABLE_REASON_PERMISSIONS_INCREASE = 2;
-export const browserUserDataDirectories = ({ platform = process.platform, env = process.env, home = homedir() } = {}) => {
+export const browserUserDataDirectories = ({ platform = process.platform, env = process.env, home = homedir(), } = {}) => {
     if (platform === 'win32') {
         const local = env.LOCALAPPDATA || win32.join(home, 'AppData', 'Local');
         const roaming = env.APPDATA || win32.join(home, 'AppData', 'Roaming');
@@ -50,14 +50,15 @@ const { maxDisableReason, maxDisableReasons } = EXTENSION_INSTALL_VOCABULARY;
 // Chromium 155 stores the reasons as a list of reason values (measured), which is kept as it is; older builds stored one
 // integer bitmask, which is split into its set bits. Anything else is undefined.
 // Parse boundary: the stored reasons are read from a browser's preference file.
+const isReason = (reason) => typeof reason === 'number' && Number.isInteger(reason) && reason >= 1 && reason <= maxDisableReason;
 const reasonsOf = (value) => {
     if (value === undefined)
         return [];
     if (Array.isArray(value)) {
-        const reasons = [...new Set(value)].sort((a, b) => a - b);
-        return reasons.length <= maxDisableReasons && reasons.every((reason) => Number.isInteger(reason) && reason >= 1 && reason <= maxDisableReason) ? reasons : undefined;
+        const reasons = [...new Set(value)].sort((a, b) => Number(a) - Number(b));
+        return reasons.length <= maxDisableReasons && reasons.every(isReason) ? reasons : undefined;
     }
-    if (!Number.isInteger(value) || value < 0 || value > MAX_REASON_MASK)
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_REASON_MASK)
         return undefined;
     const bits = [];
     for (let bit = 1; bit <= value; bit *= 2)
@@ -70,7 +71,9 @@ const reasonsOf = (value) => {
 // Parse boundary: `entry` comes from a browser's preference file.
 export const classifyExtensionSettings = (entry) => {
     const unknown = { state: 'unknown', disableReasons: [], permissionsIncrease: false };
-    const disableReasons = isRecord(entry) ? reasonsOf(entry.disable_reasons) : undefined;
+    if (!isRecord(entry))
+        return unknown;
+    const disableReasons = reasonsOf(entry.disable_reasons);
     if (!disableReasons)
         return unknown;
     if (disableReasons.length > 0)
@@ -80,17 +83,24 @@ export const classifyExtensionSettings = (entry) => {
 };
 export const isNativeCapableVersion = (version) => compareBrokerVersions(version, NATIVE_EXTENSION_MIN_VERSION) >= 0;
 // Parse boundary: anything a file call threw.
-const failureCause = (error) => ['EACCES', 'EPERM'].includes(error?.code) ? 'permission_denied' : 'io_error';
-const recordFailure = (facts, cause) => { facts.readFailures += 1; facts.failureCause ??= cause; };
+const errorCode = (error) => (isRecord(error) ? error.code : undefined);
+const failureCause = (error) => (isOneOf(['EACCES', 'EPERM'], errorCode(error)) ? 'permission_denied' : 'io_error');
+const recordFailure = (facts, cause) => {
+    facts.readFailures += 1;
+    facts.failureCause ??= cause;
+};
 // Parse boundary: a browser's JSON file, read field by field afterwards.
 const readJson = async (fileSystem, path) => {
     try {
-        return { ok: true, value: JSON.parse(await fileSystem.readFile(path, 'utf8')) };
+        const value = JSON.parse(await fileSystem.readFile(path, 'utf8'));
+        return { ok: true, value };
     }
     catch (error) {
-        return { ok: false, absent: error?.code === 'ENOENT', cause: failureCause(error) };
+        return { ok: false, absent: errorCode(error) === 'ENOENT', cause: failureCause(error) };
     }
 };
+// The `extensions.settings` record of a preference file, as read.
+const settingsOf = (read) => read.ok && isRecord(read.value) && isRecord(read.value.extensions) ? read.value.extensions.settings : undefined;
 // A name from `Local State` becomes a path, so it has to be one plain segment.
 const plainSegment = (name) => name.length > 0 && name !== '.' && name !== '..' && !/[\\/\u0000:]/u.test(name);
 const directory = async (fileSystem, path) => {
@@ -98,7 +108,7 @@ const directory = async (fileSystem, path) => {
         return { exists: (await fileSystem.stat(path)).isDirectory() };
     }
     catch (error) {
-        return error?.code === 'ENOENT' ? { exists: false } : { exists: false, cause: failureCause(error) };
+        return errorCode(error) === 'ENOENT' ? { exists: false } : { exists: false, cause: failureCause(error) };
     }
 };
 // Chromium keeps an installed copy in `Extensions/<id>/<version>_<n>`. Only its name is read: the version is the
@@ -152,7 +162,9 @@ const newestModification = async (fileSystem, paths) => {
             if (Number.isFinite(mtimeMs) && (newest === undefined || mtimeMs > newest))
                 newest = mtimeMs;
         }
-        catch { /* absence or denial: recency stays unknown for this file */ }
+        catch {
+            /* absence or denial: recency stays unknown for this file */
+        }
     }
     return newest;
 };
@@ -162,12 +174,15 @@ const daysAgo = (mtimeMs, nowMs) => Math.max(0, Math.floor((nowMs - mtimeMs) / D
 // last use in ms go only to `profilePaths`, never into the facts.
 const probeProfile = async (fileSystem, join, path, name, extensionId, facts, nowMs, profilePaths, { focused, open }) => {
     const copies = await installedCopies(fileSystem, join, path, extensionId, facts);
-    const recordIn = (read) => (read.ok && isRecord(read.value) ? read.value.extensions?.settings?.[extensionId] : undefined);
+    const recordIn = (read) => {
+        const settings = settingsOf(read);
+        return isRecord(settings) ? settings[extensionId] : undefined;
+    };
     let preferences = await readJson(fileSystem, join(path, 'Secure Preferences'));
     // Chromium protects the records only on Windows and macOS (chrome_pref_service_factory.cc): elsewhere `Secure
     // Preferences` holds only `protection`, and the records are in `Preferences`. A protected file with records but none
     // for e-Comet answers for the profile, so its `Preferences` is not read.
-    if (preferences.absent || (preferences.ok && !isRecord(preferences.value?.extensions?.settings)))
+    if (preferences.absent || (preferences.ok && !isRecord(settingsOf(preferences))))
         preferences = await readJson(fileSystem, join(path, 'Preferences'));
     if (!preferences.ok && !preferences.absent)
         recordFailure(facts, preferences.cause);
@@ -176,9 +191,10 @@ const probeProfile = async (fileSystem, join, path, name, extensionId, facts, no
         return;
     // Command-line and unpacked extensions keep no manifest in their record (Chromium extension_prefs.cc), so the
     // installed copy's folder names their version. A stored manifest always wins, and an unusable stored version is dropped.
-    const version = isRecord(entry?.manifest) ? safeExtensionVersion(entry.manifest.version) : copies.version;
+    const version = isRecord(entry) && isRecord(entry.manifest) ? safeExtensionVersion(entry.manifest.version) : copies.version;
     // A delayed install (an update waiting for the extension to become idle) keeps the new manifest under `idle_install_info`.
-    const pendingVersion = safeExtensionVersion(entry?.idle_install_info?.manifest?.version);
+    const idle = isRecord(entry) && isRecord(entry.idle_install_info) ? entry.idle_install_info.manifest : undefined;
+    const pendingVersion = safeExtensionVersion(isRecord(idle) ? idle.version : undefined);
     const newest = await newestModification(fileSystem, [join(path, 'Preferences'), join(path, 'Secure Preferences')]);
     const settings = classifyExtensionSettings(entry);
     const lastUsed = newest === undefined ? {} : { lastUsedDaysAgo: daysAgo(newest, nowMs) };
@@ -189,8 +205,15 @@ const probeProfile = async (fileSystem, join, path, name, extensionId, facts, no
         ...(pendingVersion === undefined ? {} : { pendingVersion }),
         ...lastUsed,
     });
-    profilePaths?.push({ browser: facts.browser, path, state: settings.state, ...lastUsed, ...(newest === undefined ? {} : { lastUsedAtMs: newest }),
-        lastFocused: focused, ...(open === undefined ? {} : { open }) });
+    profilePaths?.push({
+        browser: facts.browser,
+        path,
+        state: settings.state,
+        ...lastUsed,
+        ...(newest === undefined ? {} : { lastUsedAtMs: newest }),
+        lastFocused: focused,
+        ...(open === undefined ? {} : { open }),
+    });
 };
 // Whether the browser runs, from the process singleton Chromium keeps in its user-data folder, with plain reads and no
 // new process. Windows: a `lockfile` held open delete-on-close, so it exists only while the browser runs, even after a
@@ -200,7 +223,7 @@ const probeProfile = async (fileSystem, join, path, name, extensionId, facts, no
 // process is checked with signal 0 (EPERM: it exists), whatever the host name, which macOS changes with the network:
 // Chromium itself takes another host's lock as live while its pid runs (process_singleton_posix.cc); accepted residual
 // "Another computer's browser lock in a shared home folder". `running` is null when it cannot be told.
-const runningState = async ({ fileSystem, platform, path, kill, bootMs }) => {
+const runningState = async ({ fileSystem, platform, path, kill, bootMs, }) => {
     try {
         if (platform === 'win32') {
             const { mtimeMs } = await fileSystem.stat(win32.join(path, 'lockfile'));
@@ -218,26 +241,33 @@ const runningState = async ({ fileSystem, platform, path, kill, bootMs }) => {
             kill(pid, 0);
         }
         catch (error) {
-            if (error?.code !== 'EPERM')
+            if (errorCode(error) !== 'EPERM')
                 return { running: false };
         }
         return { running: true, runningSince: new Date(mtimeMs).toISOString() };
     }
     catch (error) {
-        return { running: error?.code === 'ENOENT' ? false : null };
+        return { running: errorCode(error) === 'ENOENT' ? false : null };
     }
 };
 const probeBrowser = async (fileSystem, join, target, extensionId, nowMs, profilePaths) => {
-    const facts = { browser: target.browser, profileSource: 'local_state', readFailures: 0, profiles: [], failureCause: undefined };
+    const facts = {
+        browser: target.browser,
+        profileSource: 'local_state',
+        readFailures: 0,
+        profiles: [],
+        failureCause: undefined,
+    };
     const local = await readJson(fileSystem, join(target.path, 'Local State'));
     // Chromium's `profile.last_used` names the profile whose window was focused last, and `profile.last_active_profiles`
     // the profiles with an open window; both followed the windows on Chrome 156 (stand, 2026-10-27).
-    const lastUsed = local.ok ? local.value?.profile?.last_used : undefined;
-    const lastActive = local.ok && Array.isArray(local.value?.profile?.last_active_profiles) ? local.value.profile.last_active_profiles : undefined;
+    const profile = local.ok && isRecord(local.value) && isRecord(local.value.profile) ? local.value.profile : {};
+    const lastUsed = profile.last_used;
+    const lastActive = Array.isArray(profile.last_active_profiles) ? profile.last_active_profiles : undefined;
     const windowsOf = (name) => ({ focused: typeof lastUsed === 'string' && name === lastUsed, open: lastActive?.includes(name) });
-    let names = [];
-    if (local.ok && isRecord(local.value?.profile?.info_cache))
-        names = Object.keys(local.value.profile.info_cache);
+    let names;
+    if (isRecord(profile.info_cache))
+        names = Object.keys(profile.info_cache);
     else {
         facts.profileSource = 'default_only';
         names = ['Default'];
@@ -279,10 +309,15 @@ const probeBrowser = async (fileSystem, join, target, extensionId, nowMs, profil
 };
 // `profilePaths`, when given, receives `{ browser, path, state, lastUsedDaysAgo?, lastUsedAtMs?, lastFocused, open? }` for
 // every listed profile: the extension log reader's input, kept out of the facts.
-export const probeBrowserExtensionInstall = async ({ observedAt, now = Date.now, platform = process.platform, env = process.env, home = homedir(), fileSystem = fs, extensionId = EXTENSION_ID, kill = (pid, signal) => process.kill(pid, signal), uptime = osUptime, profilePaths } = {}) => {
-    const base = { check: 'extension_install', observedAt: observedAt ?? new Date(now()).toISOString(), source: 'browser_profile_metadata', executionPlane: 'device' };
+export const probeBrowserExtensionInstall = async ({ observedAt, now = Date.now, platform = process.platform, env = process.env, home = homedir(), fileSystem = fs, extensionId = EXTENSION_ID, kill = (pid, signal) => process.kill(pid, signal), uptime = osUptime, profilePaths, } = {}) => {
+    const base = {
+        check: 'extension_install',
+        observedAt: observedAt ?? new Date(now()).toISOString(),
+        source: 'browser_profile_metadata',
+        executionPlane: 'device',
+    };
     const join = platform === 'win32' ? win32.join : posix.join;
-    // Accepted residual "A clock stepped forward after boot hides a running browser": docs/local-agent-architecture.md#accepted-residuals.
+    // Accepted residual "A clock stepped forward after boot hides a running browser": docs/architecture/residuals/native-bridge.md.
     const bootMs = now() - uptime() * 1000;
     const browsers = [];
     let cause;

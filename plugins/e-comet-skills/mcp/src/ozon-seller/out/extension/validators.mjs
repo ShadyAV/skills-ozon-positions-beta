@@ -1,12 +1,12 @@
-import { ARTIFACT_MAX_FILE_BYTES } from '../../../storage/limits.mjs';
-import { MAX_BROWSER_JOB_TEXT_LENGTH } from '../../../transport/mcp/limits.mjs';
-import { MESSAGE_TYPES, OZON_ANALYTICS_SERVER_MESSAGE_TYPES, OZON_ANALYTICS_TERMINAL_CODE_STAGES, isOzonAnalyticsTerminalDetails, isOzonExecutionInterruptionDetails, OZON_PROMOTION_SERVER_MESSAGE_TYPES, OZON_SEARCH_POSITIONS_TERMINAL_CODE_STAGES, } from '../../../transport/extension/wire.mjs';
-import { MAX_ID_LENGTH, hasOnlyKeys, isNonNegativeSafeInteger } from '../../../bridge/broker/messages.mjs';
-import { isRecord } from '../../../shared/values.mjs';
+import { MAX_ID_LENGTH } from '../../../bridge/broker/messages.mjs';
 import { MAX_OZON_REPORT_PACKAGE_ITEMS } from '../../domain/constants/limits.const.mjs';
 import { safeOzonPromotionToolError } from '../../domain/converters/errors.converter.mjs';
 import { parseOzonPromotionPeriod } from '../../domain/policies/promotion.policy.mjs';
 import { isSearchPositionsSkuList, isValidOzonSearchPositionsDetails } from '../../domain/policies/search-positions.policy.mjs';
+import { hasOnlyOwnKeys, isBoundedText, isNonNegativeSafeInteger, isOneOf, isPositiveSafeInteger, isRecord } from '../../../shared/values.mjs';
+import { ARTIFACT_MAX_FILE_BYTES } from '../../../storage/limits.mjs';
+import { MESSAGE_TYPES, OZON_ANALYTICS_SERVER_MESSAGE_TYPES, OZON_ANALYTICS_TERMINAL_CODE_STAGES, isOzonAnalyticsTerminalDetails, isOzonExecutionInterruptionDetails, OZON_PROMOTION_SERVER_MESSAGE_TYPES, OZON_SEARCH_POSITIONS_TERMINAL_CODE_STAGES, } from '../../../transport/extension/wire.mjs';
+import { MAX_BROWSER_JOB_TEXT_LENGTH } from '../../../transport/mcp/limits.mjs';
 // The Ozon frame validators (refactor spec §7.4): the operation this process sends, and every frame the extension
 // answers with, by type, before the frame reaches its request.
 const MAX_STREAM_CHUNK_BYTES = 256 * 1024;
@@ -15,27 +15,23 @@ const XLSX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.spreadshee
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_SAFE_MESSAGE_LENGTH = 500;
-const isBoundedString = (value, maxLength) => typeof value === 'string' && value.length > 0 && value.length <= maxLength;
 const isValidBase64Chunk = (value) => {
-    if (typeof value !== 'string' ||
-        value.length === 0 ||
-        value.length > MAX_BASE64_STREAM_CHUNK_LENGTH ||
-        !BASE64_PATTERN.test(value)) {
+    if (typeof value !== 'string' || value.length === 0 || value.length > MAX_BASE64_STREAM_CHUNK_LENGTH || !BASE64_PATTERN.test(value)) {
         return false;
     }
     const decoded = Buffer.from(value, 'base64');
     return decoded.toString('base64') === value && decoded.byteLength <= MAX_STREAM_CHUNK_BYTES;
 };
 // Parse boundary: every check below reads a frame the extension wrote, field by field.
-export const isValidOzonReportPhase = (value) => isRecord(value) && hasOnlyKeys(value, ['family', 'frameId', 'itemIndex', 'phase']) &&
-    ['promotion', 'analytics'].includes(value.family) && isBoundedString(value.frameId, 128) &&
-    isNonNegativeSafeInteger(value.itemIndex) && value.itemIndex < MAX_OZON_REPORT_PACKAGE_ITEMS &&
-    ['pre_create', 'create_dispatched', 'create_settled', 'polling', 'downloading', 'streaming'].includes(value.phase);
+export const isValidOzonReportPhase = (value) => isRecord(value) &&
+    hasOnlyOwnKeys(value, ['family', 'frameId', 'itemIndex', 'phase']) &&
+    isOneOf(['promotion', 'analytics'], value.family) &&
+    isBoundedText(value.frameId, 128) &&
+    isNonNegativeSafeInteger(value.itemIndex) &&
+    value.itemIndex < MAX_OZON_REPORT_PACKAGE_ITEMS &&
+    isOneOf(['pre_create', 'create_dispatched', 'create_settled', 'polling', 'downloading', 'streaming'], value.phase);
 export const isValidOzonPromotionOperation = (value) => {
-    if (!isRecord(value) ||
-        !hasOnlyKeys(value, ['dateFrom', 'dateTo', 'deadlineAt']) ||
-        !Number.isSafeInteger(value.deadlineAt) ||
-        value.deadlineAt <= 0) {
+    if (!isRecord(value) || !hasOnlyOwnKeys(value, ['dateFrom', 'dateTo', 'deadlineAt']) || !isPositiveSafeInteger(value.deadlineAt)) {
         return false;
     }
     try {
@@ -47,33 +43,32 @@ export const isValidOzonPromotionOperation = (value) => {
     }
 };
 const isValidOzonStreamStart = (value, indexed = false) => isRecord(value) &&
-    hasOnlyKeys(value, ['frameId', 'itemIndex', 'name', 'mimeType', 'declaredSize']) &&
+    hasOnlyOwnKeys(value, ['frameId', 'itemIndex', 'name', 'mimeType', 'declaredSize']) &&
     (!indexed || isNonNegativeSafeInteger(value.itemIndex)) &&
     (indexed || value.itemIndex === undefined) &&
-    isBoundedString(value.frameId, MAX_ID_LENGTH) &&
-    isBoundedString(value.name, MAX_BROWSER_JOB_TEXT_LENGTH) &&
+    isBoundedText(value.frameId, MAX_ID_LENGTH) &&
+    isBoundedText(value.name, MAX_BROWSER_JOB_TEXT_LENGTH) &&
     value.mimeType === XLSX_MIME_TYPE &&
-    (value.declaredSize === undefined ||
-        (isNonNegativeSafeInteger(value.declaredSize) && value.declaredSize <= ARTIFACT_MAX_FILE_BYTES));
+    (value.declaredSize === undefined || (isNonNegativeSafeInteger(value.declaredSize) && value.declaredSize <= ARTIFACT_MAX_FILE_BYTES));
 const isValidOzonStreamChunk = (value, indexed = false) => isRecord(value) &&
-    hasOnlyKeys(value, ['frameId', 'itemIndex', 'index', 'data']) &&
+    hasOnlyOwnKeys(value, ['frameId', 'itemIndex', 'index', 'data']) &&
     (!indexed || isNonNegativeSafeInteger(value.itemIndex)) &&
     (indexed || value.itemIndex === undefined) &&
-    isBoundedString(value.frameId, MAX_ID_LENGTH) &&
+    isBoundedText(value.frameId, MAX_ID_LENGTH) &&
     isNonNegativeSafeInteger(value.index) &&
     isValidBase64Chunk(value.data);
 const isValidOzonStreamEnd = (value, indexed = false) => isRecord(value) &&
-    hasOnlyKeys(value, ['frameId', 'itemIndex', 'size', 'sha256']) &&
+    hasOnlyOwnKeys(value, ['frameId', 'itemIndex', 'size', 'sha256']) &&
     (!indexed || isNonNegativeSafeInteger(value.itemIndex)) &&
     (indexed || value.itemIndex === undefined) &&
-    isBoundedString(value.frameId, MAX_ID_LENGTH) &&
+    isBoundedText(value.frameId, MAX_ID_LENGTH) &&
     isNonNegativeSafeInteger(value.size) &&
     value.size <= ARTIFACT_MAX_FILE_BYTES &&
     typeof value.sha256 === 'string' &&
     SHA256_PATTERN.test(value.sha256);
 const isValidOzonResult = (value, allowSkipped = false) => {
     // Promotion may carry date context; analytics below deliberately requires its own exact error keys.
-    if (!isRecord(value) || !hasOnlyKeys(value, ['ok', 'status', 'error']))
+    if (!isRecord(value) || !hasOnlyOwnKeys(value, ['ok', 'status', 'error']))
         return false;
     if (value.ok === true)
         return Object.keys(value).length === 1;
@@ -81,7 +76,7 @@ const isValidOzonResult = (value, allowSkipped = false) => {
     if (value.ok !== false || (!skipped && Object.keys(value).length !== 2) || !isRecord(value.error))
         return false;
     const error = value.error;
-    if (!hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message', 'dateFrom', 'dateTo', 'details']) ||
+    if (!hasOnlyOwnKeys(error, ['code', 'stage', 'retryable', 'message', 'dateFrom', 'dateTo', 'details']) ||
         (Object.hasOwn(error, 'details') && (!allowSkipped || !isOzonExecutionInterruptionDetails(error.code, error.details))) ||
         typeof error.message !== 'string' ||
         error.message.length === 0 ||
@@ -106,7 +101,7 @@ const isValidIndexedOzonResult = (value, family) => {
     const { itemIndex: _itemIndex, ...result } = value;
     if (family === 'promotion')
         return isValidOzonResult(result, true);
-    if (!isRecord(result) || !hasOnlyKeys(result, ['ok', 'status', 'error']))
+    if (!isRecord(result) || !hasOnlyOwnKeys(result, ['ok', 'status', 'error']))
         return false;
     if (result.ok === true)
         return Object.keys(result).length === 1;
@@ -114,9 +109,11 @@ const isValidIndexedOzonResult = (value, family) => {
     if (result.ok !== false || (!skipped && Object.keys(result).length !== 2) || !isRecord(result.error))
         return false;
     const error = result.error;
-    return (hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message', 'details']) &&
-        (!Object.hasOwn(error, 'details') || (!skipped && isOzonAnalyticsTerminalDetails(error.code, error.details)) ||
+    return (hasOnlyOwnKeys(error, ['code', 'stage', 'retryable', 'message', 'details']) &&
+        (!Object.hasOwn(error, 'details') ||
+            (!skipped && isOzonAnalyticsTerminalDetails(error.code, error.details)) ||
             isOzonExecutionInterruptionDetails(error.code, error.details)) &&
+        typeof error.code === 'string' &&
         OZON_ANALYTICS_TERMINAL_CODE_STAGES[error.code] === error.stage &&
         error.retryable === false &&
         typeof error.message === 'string' &&
@@ -124,9 +121,13 @@ const isValidIndexedOzonResult = (value, family) => {
         error.message.length <= MAX_SAFE_MESSAGE_LENGTH);
 };
 const MAX_OZON_SEARCH_POSITIONS_LABEL_LENGTH = 32;
-const isValidOzonSearchPositionsCell = (cell) => isRecord(cell) && Object.keys(cell).length === 2 && Number.isSafeInteger(cell.sku) && cell.sku > 0 &&
-    ((Number.isSafeInteger(cell.position) && cell.position > 0) || cell.found === false || cell.returned === false ||
-        isBoundedString(cell.label, MAX_OZON_SEARCH_POSITIONS_LABEL_LENGTH));
+const isValidOzonSearchPositionsCell = (cell) => isRecord(cell) &&
+    Object.keys(cell).length === 2 &&
+    isPositiveSafeInteger(cell.sku) &&
+    (isPositiveSafeInteger(cell.position) ||
+        cell.found === false ||
+        cell.returned === false ||
+        isBoundedText(cell.label, MAX_OZON_SEARCH_POSITIONS_LABEL_LENGTH));
 // `skus` is the signed SKU list: cells are exactly one per SKU in that order. Without it (the wire
 // parser, before correlation) the cell SKUs must still form a valid signed list. EMPTY has no cells:
 // «no data for this query» must never read as «not found» for every SKU.
@@ -136,53 +137,58 @@ export const isValidOzonSearchPositionsResult = (payload, skus) => {
         return false;
     }
     if (payload.ok === true) {
-        if (!hasOnlyKeys(payload, ['itemIndex', 'ok', 'status', 'checkedAt', 'positions']) || Object.keys(payload).length !== 5 ||
+        if (!hasOnlyOwnKeys(payload, ['itemIndex', 'ok', 'status', 'checkedAt', 'positions']) ||
+            Object.keys(payload).length !== 5 ||
             // The last millisecond of year 9999: toISOString() keeps the four-digit year the output schema requires.
-            !Number.isSafeInteger(payload.checkedAt) || payload.checkedAt <= 0 || payload.checkedAt > 253402300799999 || !Array.isArray(payload.positions))
+            !isPositiveSafeInteger(payload.checkedAt) ||
+            payload.checkedAt > 253402300799999 ||
+            !Array.isArray(payload.positions))
             return false;
+        const positions = payload.positions;
         if (payload.status === 'empty')
-            return payload.positions.length === 0;
-        if (payload.status !== 'complete' || !payload.positions.every(isValidOzonSearchPositionsCell))
+            return positions.length === 0;
+        if (payload.status !== 'complete' || !positions.every(isValidOzonSearchPositionsCell))
             return false;
-        const cellSkus = payload.positions.map(({ sku }) => sku);
+        const cellSkus = positions.map(({ sku }) => sku);
         return skus === undefined
             ? isSearchPositionsSkuList(cellSkus)
             : cellSkus.length === skus.length && cellSkus.every((sku, index) => sku === skus[index]);
     }
-    if (payload.ok !== false || !hasOnlyKeys(payload, ['itemIndex', 'ok', 'status', 'error']) || !isRecord(payload.error))
+    if (payload.ok !== false || !hasOnlyOwnKeys(payload, ['itemIndex', 'ok', 'status', 'error']) || !isRecord(payload.error))
         return false;
     const skipped = payload.status === 'skipped';
     if (!skipped && Object.hasOwn(payload, 'status'))
         return false;
     const { error } = payload;
-    return (hasOnlyKeys(error, ['code', 'stage', 'retryable', 'message', 'details']) &&
+    return (hasOnlyOwnKeys(error, ['code', 'stage', 'retryable', 'message', 'details']) &&
+        typeof error.code === 'string' &&
         Object.hasOwn(OZON_SEARCH_POSITIONS_TERMINAL_CODE_STAGES, error.code) &&
         OZON_SEARCH_POSITIONS_TERMINAL_CODE_STAGES[error.code] === error.stage &&
         error.retryable === false &&
-        isBoundedString(error.message, MAX_SAFE_MESSAGE_LENGTH) &&
+        isBoundedText(error.message, MAX_SAFE_MESSAGE_LENGTH) &&
         (!Object.hasOwn(error, 'details') || (!skipped && isValidOzonSearchPositionsDetails(error.code, error.details))));
 };
 // The Ozon frames beside the extension's own vocabulary: the Ozon operations, their report phases and position results.
-export const OZON_OPERATION_TYPES = Object.freeze([
+export const OZON_OPERATION_TYPES = [
     ...OZON_PROMOTION_SERVER_MESSAGE_TYPES,
     ...OZON_ANALYTICS_SERVER_MESSAGE_TYPES,
     MESSAGE_TYPES.ozonReportPhase,
     MESSAGE_TYPES.ozonSearchPositionsResult,
-]);
+];
 // An Ozon frame's payload is valid for its type; a frame of any other type is not checked here.
 export const isValidOzonOperationPayload = (type, payload) => {
+    // The message parser admits only object payloads.
+    const indexed = isRecord(payload) && Object.hasOwn(payload, 'itemIndex');
     if (type === MESSAGE_TYPES.ozonReportPhase && !isValidOzonReportPhase(payload))
         return false;
-    if (type === MESSAGE_TYPES.ozonPromotionStreamStart &&
-        !isValidOzonStreamStart(payload, Object.hasOwn(payload, 'itemIndex')))
+    if (type === MESSAGE_TYPES.ozonPromotionStreamStart && !isValidOzonStreamStart(payload, indexed))
         return false;
-    if (type === MESSAGE_TYPES.ozonPromotionStreamChunk &&
-        !isValidOzonStreamChunk(payload, Object.hasOwn(payload, 'itemIndex')))
+    if (type === MESSAGE_TYPES.ozonPromotionStreamChunk && !isValidOzonStreamChunk(payload, indexed))
         return false;
-    if (type === MESSAGE_TYPES.ozonPromotionStreamEnd && !isValidOzonStreamEnd(payload, Object.hasOwn(payload, 'itemIndex')))
+    if (type === MESSAGE_TYPES.ozonPromotionStreamEnd && !isValidOzonStreamEnd(payload, indexed))
         return false;
     if (type === MESSAGE_TYPES.ozonPromotionResult &&
-        !(Object.hasOwn(payload, 'itemIndex') ? isValidIndexedOzonResult(payload, 'promotion') : isValidOzonResult(payload)))
+        !(indexed ? isValidIndexedOzonResult(payload, 'promotion') : isValidOzonResult(payload)))
         return false;
     if (type === MESSAGE_TYPES.ozonAnalyticsStreamStart && !isValidOzonStreamStart(payload, true))
         return false;

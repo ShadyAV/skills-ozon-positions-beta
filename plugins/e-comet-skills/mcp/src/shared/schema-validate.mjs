@@ -25,7 +25,7 @@ const canonicalUniqueValue = (value, ancestors = new Set()) => {
         }
         return `object:{${Object.keys(value)
             .sort()
-            .map((key) => `${JSON.stringify(key)}:${canonicalUniqueValue(value[key], ancestors)}`)
+            .map((key) => `${JSON.stringify(key)}:${canonicalUniqueValue(Reflect.get(value, key), ancestors)}`)
             .join(',')}}`;
     }
     finally {
@@ -58,10 +58,11 @@ const hasUniqueItems = (values) => {
 export const validateSchemaValue = (value, schema) => {
     if (schema.allOf && !schema.allOf.every((candidate) => validateSchemaValue(value, candidate)))
         return false;
-    if (schema.contains) {
+    const contains = schema.contains;
+    if (contains) {
         if (!Array.isArray(value))
             return false;
-        const matches = value.filter((item) => validateSchemaValue(item, schema.contains)).length;
+        const matches = value.filter((item) => validateSchemaValue(item, contains)).length;
         if (matches < (schema.minContains ?? 1) || matches > (schema.maxContains ?? Infinity))
             return false;
     }
@@ -79,7 +80,8 @@ export const validateSchemaValue = (value, schema) => {
         if ((schema.required || []).some((name) => !Object.hasOwn(value, name)))
             return false;
         return Object.entries(value).every(([name, propertyValue]) => {
-            if (!Object.hasOwn(properties, name)) {
+            const propertySchema = Object.hasOwn(properties, name) ? properties[name] : undefined;
+            if (!propertySchema) {
                 if (schema.additionalProperties === false)
                     return false;
                 if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
@@ -87,14 +89,14 @@ export const validateSchemaValue = (value, schema) => {
                 }
                 return true;
             }
-            const propertySchema = properties[name];
             return validateSchemaValue(propertyValue, propertySchema);
         });
     }
     if (schema.type === 'array') {
         if (!Array.isArray(value) || value.length < (schema.minItems ?? 0) || value.length > (schema.maxItems ?? Infinity))
             return false;
-        if (!value.every((item) => validateSchemaValue(item, schema.items)))
+        const items = schema.items;
+        if (!value.every((item) => items !== undefined && validateSchemaValue(item, items)))
             return false;
         return !schema.uniqueItems || hasUniqueItems(value);
     }
@@ -106,7 +108,8 @@ export const validateSchemaValue = (value, schema) => {
             (!schema.pattern || new RegExp(schema.pattern).test(value)));
     }
     if (schema.type === 'integer') {
-        return (Number.isSafeInteger(value) &&
+        return (typeof value === 'number' &&
+            Number.isSafeInteger(value) &&
             value >= (schema.minimum ?? -Infinity) &&
             value <= (schema.maximum ?? Infinity));
     }

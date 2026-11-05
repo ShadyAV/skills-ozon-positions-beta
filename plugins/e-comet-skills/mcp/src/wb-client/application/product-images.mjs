@@ -1,6 +1,9 @@
+import { fieldOf } from '../../shared/values.mjs';
+import { createConcurrencyLimiter, runWithConcurrency } from './concurrency.mjs';
 import { IMAGE_BASKET_BOUNDS, IMAGE_CONCURRENCY } from '../domain/constants/limits.const.mjs';
 import { basketNumberForVol, imageBaseUrl } from '../domain/converters/images.converter.mjs';
-import { createConcurrencyLimiter, runWithConcurrency } from './concurrency.mjs';
+// Whether a probe failure is the image service's coded rate limit rather than any other error.
+const isRateLimited = (error) => fieldOf(error, 'code') === 'WB_IMAGE_RATE_LIMITED';
 export const discoverImageBasket = async (nmId, maxBasket, size, timeout, probe, testOrigin = undefined) => {
     const vol = Math.floor(nmId / 100000);
     const predicted = basketNumberForVol(vol);
@@ -18,13 +21,13 @@ export const discoverImageBasket = async (nmId, maxBasket, size, timeout, probe,
             const baseUrl = imageBaseUrl(nmId, basket, testOrigin);
             return (await probe(`${baseUrl}/${size}/1.webp`, timeout)) ? { basket, baseUrl } : null;
         }));
-        const match = matches.find(result => result.status === 'fulfilled' && result.value);
+        const match = matches.find((result) => result.status === 'fulfilled' && result.value);
         if (match?.status === 'fulfilled')
             return match.value;
-        const limited = matches.find(result => result.status === 'rejected' && result.reason?.code === 'WB_IMAGE_RATE_LIMITED');
+        const limited = matches.find((result) => result.status === 'rejected' && isRateLimited(result.reason));
         if (limited?.status === 'rejected')
             throw limited.reason;
-        const failure = matches.find(result => result.status === 'rejected');
+        const failure = matches.find((result) => result.status === 'rejected');
         if (failure?.status === 'rejected')
             probeFailure ??= failure.reason;
     }
@@ -35,17 +38,18 @@ export const discoverImageBasket = async (nmId, maxBasket, size, timeout, probe,
     return null;
 };
 const imageError = (error) => ({
-    code: error?.code === 'WB_IMAGE_RATE_LIMITED' ? 'WB_IMAGE_RATE_LIMITED' : 'WB_IMAGE_PROBE_FAILED',
-    message: error?.code === 'WB_IMAGE_RATE_LIMITED'
+    code: isRateLimited(error) ? 'WB_IMAGE_RATE_LIMITED' : 'WB_IMAGE_PROBE_FAILED',
+    message: isRateLimited(error)
         ? 'Wildberries limited image requests. Further probes were skipped; found URLs are preserved. Do not retry automatically.'
         : 'The image lookup could not establish whether all requested images exist.',
-    stage: 'images', retryable: false,
+    stage: 'images',
+    retryable: false,
 });
 /**
  * The image rows of each product, appended to the result file as they finish. A WB rate limit stops every probe not yet
  * started; the probes that found images keep them. `probe(url, timeout, signal)` answers whether one image exists.
  */
-export const lookupProductImages = async ({ nmIds, maxPhotos, maxBasket, size, timeout, probe: probeImageExists, shutdownSignal, writer, testOrigin }) => {
+export const lookupProductImages = async ({ nmIds, maxPhotos, maxBasket, size, timeout, probe: probeImageExists, shutdownSignal, writer, testOrigin, }) => {
     const currentWriter = writer;
     let rateLimitError;
     const stopProbes = new AbortController();
@@ -58,7 +62,7 @@ export const lookupProductImages = async ({ nmIds, maxPhotos, maxBasket, size, t
             return await probeImageExists(url, requestTimeout, probeSignal);
         }
         catch (error) {
-            if (error?.code === 'WB_IMAGE_RATE_LIMITED') {
+            if (isRateLimited(error)) {
                 rateLimitError ??= error;
                 stopProbes.abort();
             }
@@ -70,17 +74,20 @@ export const lookupProductImages = async ({ nmIds, maxPhotos, maxBasket, size, t
         let discovered;
         let failure;
         let started = false;
-        const probe = (url, requestTimeout) => limitedImageExists(url, requestTimeout, () => { started = true; });
+        const probe = (url, requestTimeout) => limitedImageExists(url, requestTimeout, () => {
+            started = true;
+        });
         const skipped = Boolean(rateLimitError);
         try {
             if (skipped)
                 throw rateLimitError;
-            discovered = await discoverImageBasket(nmId, maxBasket, size, timeout, probe, testOrigin);
-            if (discovered) {
+            const found = await discoverImageBasket(nmId, maxBasket, size, timeout, probe, testOrigin);
+            discovered = found;
+            if (found) {
                 // Discovery already proved photo 1 exists; retain it even if later probes stop.
-                imageUrls.push(`${discovered.baseUrl}/${size}/1.webp`);
+                imageUrls.push(`${found.baseUrl}/${size}/1.webp`);
                 const outcomes = await runWithConcurrency(Array.from({ length: maxPhotos - 1 }, (_, index) => index + 2), IMAGE_CONCURRENCY, async (photo) => {
-                    const url = `${discovered.baseUrl}/${size}/${photo}.webp`;
+                    const url = `${found.baseUrl}/${size}/${photo}.webp`;
                     try {
                         return (await probe(url, timeout)) ? { url } : {};
                     }
@@ -101,8 +108,7 @@ export const lookupProductImages = async ({ nmIds, maxPhotos, maxBasket, size, t
         }
         const result = {
             nmId,
-            status: failure ? (!started ? 'skipped' : imageUrls.length ? 'partial' : 'failed')
-                : imageUrls.length ? 'ok' : 'not_found',
+            status: failure ? (!started ? 'skipped' : imageUrls.length ? 'partial' : 'failed') : imageUrls.length ? 'ok' : 'not_found',
             ...(discovered ? { basket: discovered.basket, baseUrl: discovered.baseUrl } : {}),
             imageUrls,
             ...(failure ? { error: imageError(failure) } : {}),

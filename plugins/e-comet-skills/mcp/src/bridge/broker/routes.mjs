@@ -1,9 +1,9 @@
 // The session route of the diagnostic snapshot (refactor spec §6.3): asked of the connected extension only when it
 // announced the capability, in the newest version it announced.
-import { localMessage, MESSAGE_TYPES } from '../../transport/extension/wire.mjs';
 import { ToolExecutionError } from '../../shared/coded-error.mjs';
+import { localMessage, MESSAGE_TYPES } from '../../transport/extension/wire.mjs';
 // `sendExtension(message)` sends to the current session and throws a typed failure when there is none.
-export const createDiagnosticSnapshotRoute = ({ connections, sendExtension }) => ({ requestId }) => {
+export const createDiagnosticSnapshotRoute = ({ connections, sendExtension, }) => ({ requestId }) => {
     // «Спросить некого» и «спрашивать нечем» — разные наблюдения. Без подключённого расширения отказ по
     // возможности приписал бы пользователю устаревшую сборку, хотя наблюдается только отсутствие подключения.
     if (!connections.extensionReady) {
@@ -12,5 +12,7 @@ export const createDiagnosticSnapshotRoute = ({ connections, sendExtension }) =>
     if (!connections.extensionDiagnosticSnapshotReady)
         throw new ToolExecutionError('UNSUPPORTED_CAPABILITY', 'The connected extension does not support diagnostic snapshots.', 'extension', false);
     // An extension without diagnostic_snapshot_v2 refuses version 2, so it is asked for version 1 as before.
-    sendExtension(localMessage(requestId, MESSAGE_TYPES.diagnosticSnapshot, { protocolVersion: connections.extensionDiagnosticSnapshotV2Ready ? 2 : 1 }));
+    sendExtension(localMessage(requestId, MESSAGE_TYPES.diagnosticSnapshot, {
+        protocolVersion: connections.extensionDiagnosticSnapshotV2Ready ? 2 : 1,
+    }));
 };

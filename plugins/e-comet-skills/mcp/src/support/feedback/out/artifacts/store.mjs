@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { UUID_V4, isNonNegativeSafeInteger, isOneOf, isPositiveSafeInteger, isRecord } from '../../../../shared/values.mjs';
+import { currentStorageLayout, requireStorageTarget } from '../../../../storage/files/layout.mjs';
+import { sweepExpired } from '../../../../storage/files/retention.mjs';
 import { FEEDBACK_ARTIFACT_RETENTION_MS, FEEDBACK_KINDS, FEEDBACK_MAX_BYTES } from '../../domain/constants/limits.const.mjs';
 import { FeedbackPreparationError } from '../../domain/converters/errors.converter.mjs';
-import { sweepExpired } from '../../../../storage/files/retention.mjs';
-import { currentStorageLayout, requireStorageTarget } from '../../../../storage/files/layout.mjs';
-import { UUID_V4 } from '../../../../shared/values.mjs';
 const ARTIFACT_ID_PATTERN = new RegExp(`^${UUID_V4}$`);
 // A published artifact directory `report-<uuid>` or an unfinished `report-<uuid>.pending`. The name
 // deliberately differs from the bare `<uuid>` of the previous release: a session started before an
@@ -15,19 +15,18 @@ const ARTIFACT_ID_PATTERN = new RegExp(`^${UUID_V4}$`);
 const OWN_ENTRY_PATTERN = new RegExp(`^report-${UUID_V4}(?:\\.pending)?$`);
 const artifactDirectoryName = (artifactId) => `report-${artifactId}`;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const FEEDBACK_KIND_SET = new Set(FEEDBACK_KINDS);
 const MAX_META_BYTES = 4096;
 const storageError = (message, reason) => Object.assign(new Error(message), { feedbackReason: reason });
 // Registration keeps filesystem diagnostics private; the preparation boundary maps them to this stable public outcome.
 export const feedbackArtifactStorageUnavailable = (cause) => new FeedbackPreparationError('FEEDBACK_STORAGE_UNAVAILABLE', cause);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const asNodeError = (error) => (error instanceof Error ? error : new Error(String(error)));
-const isNotFound = (error) => error?.code === 'ENOENT';
+const isNotFound = (error) => isRecord(error) && error.code === 'ENOENT';
 const clock = (now) => (typeof now === 'function' ? now : () => now);
 // Whatever an older release left in this root under other names is never touched.
 const isSweptName = (name) => OWN_ENTRY_PATTERN.test(name);
 const assertPositiveInteger = (value, name) => {
-    if (!Number.isSafeInteger(value) || value <= 0)
+    if (!isPositiveSafeInteger(value))
         throw new RangeError(`Feedback ${name} must be a positive safe integer`);
 };
 const assertBytes = (value, name, maximum) => {
@@ -39,15 +38,14 @@ const assertBytes = (value, name, maximum) => {
         throw new RangeError(`Feedback ${name} exceeds the ${maximum}-byte limit`);
 };
 const assertClock = (nowMs) => {
-    if (!Number.isSafeInteger(nowMs) || nowMs < 0)
+    if (!isNonNegativeSafeInteger(nowMs))
         throw new RangeError('Feedback artifact clock must return a non-negative safe integer');
     return nowMs;
 };
 // Parse boundary: the request names the artifact, checked here.
-const assertArtifactId = (value) => {
-    if (!value || typeof value !== 'object' || !ARTIFACT_ID_PATTERN.test(value.artifactId))
+const assertArtifactRequest = (value) => {
+    if (!isRecord(value) || typeof value.artifactId !== 'string' || !ARTIFACT_ID_PATTERN.test(value.artifactId))
         throw new RangeError('Feedback artifact ID is invalid');
-    return value.artifactId;
 };
 const tightenExistingPrivateDirectory = async (directory, platform) => {
     const metadata = await lstat(directory);
@@ -72,10 +70,16 @@ const reportResource = (artifactDirectory, artifactId) => ({
     name: 'report.md',
     mimeType: 'text/markdown',
 });
-const validMeta = (meta, artifactId) => meta && typeof meta === 'object' && Object.keys(meta).length === 6 &&
-    meta.artifactId === artifactId && FEEDBACK_KIND_SET.has(meta.kind) &&
-    Number.isSafeInteger(meta.sizeBytes) && meta.sizeBytes > 0 && SHA256_PATTERN.test(meta.sha256) &&
-    typeof meta.transcriptIncluded === 'boolean' && Number.isSafeInteger(meta.createdAtMs) && meta.createdAtMs >= 0;
+// Parse boundary: meta.json as read from disk, checked here.
+const validMeta = (meta, artifactId) => isRecord(meta) &&
+    Object.keys(meta).length === 6 &&
+    meta.artifactId === artifactId &&
+    isOneOf(FEEDBACK_KINDS, meta.kind) &&
+    isPositiveSafeInteger(meta.sizeBytes) &&
+    typeof meta.sha256 === 'string' &&
+    SHA256_PATTERN.test(meta.sha256) &&
+    typeof meta.transcriptIncluded === 'boolean' &&
+    isNonNegativeSafeInteger(meta.createdAtMs);
 const readMeta = async (directory, artifactId) => {
     const path = join(directory, 'meta.json');
     let meta;
@@ -88,7 +92,7 @@ const readMeta = async (directory, artifactId) => {
     catch (error) {
         if (isNotFound(error))
             throw storageError('Feedback artifact is missing or expired', 'artifact_missing');
-        if (error?.feedbackReason)
+        if (isRecord(error) && error.feedbackReason)
             throw error;
         // Only unparseable content is corruption. A filesystem refusal (EACCES, EIO, EBUSY) keeps its
         // own code and cause, as today: support must see the real reason, not a false integrity claim.
@@ -111,28 +115,23 @@ export const maintainFeedbackArtifacts = async (options = {}) => {
     if (!explicit && storageTarget.state !== 'ready')
         return [];
     // A ready target has a path: the line above returned otherwise.
-    const artifactDirectory = (explicit ? options.artifactDirectory : storageTarget.path);
+    const artifactDirectory = options.artifactDirectory ?? requireStorageTarget(storageTarget, 'feedbackArtifacts');
     assertPositiveInteger(retentionMs, 'artifact retention');
     const nowMs = assertClock(clock(now)());
     return sweepOwn(artifactDirectory, retentionMs, nowMs);
 };
-/**
- * @param {{ kind: string, includeTranscript: boolean, reportBytes: Buffer, archiveBytes: Buffer }} artifact
- * @param {{ artifactDirectory?: string, storageTarget?: { state: string, path?: string, reason?: string }, retentionMs?: number, now?: number | (() => number), platform?: NodeJS.Platform, createArtifactId?: () => string }} options
- */
 // Parse boundary: the artifact's fields are checked here before anything is written.
 export const registerFeedbackArtifact = async (artifact, options = {}) => {
-    const { retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS, now = Date.now, platform = process.platform, createArtifactId = randomUUID } = options;
-    const artifactDirectory = options.artifactDirectory ?? requireStorageTarget(options.storageTarget ?? currentStorageLayout().feedbackArtifacts, 'feedbackArtifacts');
-    if (!artifact || typeof artifact !== 'object' || !FEEDBACK_KIND_SET.has(artifact.kind))
+    const { retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS, now = Date.now, platform = process.platform, createArtifactId = randomUUID, } = options;
+    const artifactDirectory = options.artifactDirectory ??
+        requireStorageTarget(options.storageTarget ?? currentStorageLayout().feedbackArtifacts, 'feedbackArtifacts');
+    if (!isRecord(artifact) || !isOneOf(FEEDBACK_KINDS, artifact.kind))
         throw new RangeError('Feedback kind is invalid');
     if (typeof artifact.includeTranscript !== 'boolean')
         throw new TypeError('Feedback transcript inclusion must be a boolean');
     assertBytes(artifact.reportBytes, 'report', FEEDBACK_MAX_BYTES);
     assertBytes(artifact.archiveBytes, 'archive', FEEDBACK_MAX_BYTES);
     assertPositiveInteger(retentionMs, 'artifact retention');
-    if (typeof createArtifactId !== 'function')
-        throw new TypeError('Feedback artifact ID factory must be a function');
     const nowMs = assertClock(clock(now)());
     const artifactId = createArtifactId();
     if (!ARTIFACT_ID_PATTERN.test(artifactId))
@@ -152,7 +151,11 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
     await mkdir(pendingPath, { mode: 0o700 });
     try {
         await tightenExistingPrivateDirectory(pendingPath, platform);
-        const files = [['report.md', artifact.reportBytes], ['feedback.zip', artifact.archiveBytes], ['meta.json', Buffer.from(`${JSON.stringify(meta)}\n`, 'utf8')]];
+        const files = [
+            ['report.md', artifact.reportBytes],
+            ['feedback.zip', artifact.archiveBytes],
+            ['meta.json', Buffer.from(`${JSON.stringify(meta)}\n`, 'utf8')],
+        ];
         for (const [name, bytes] of files) {
             const path = join(pendingPath, name);
             await writeFile(path, bytes, { mode: 0o600, flag: 'wx' });
@@ -165,7 +168,8 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
         await rm(pendingPath, { recursive: true, force: true }).catch(() => undefined);
         throw asNodeError(error);
     }
-    void sweepOwn(artifactDirectory, retentionMs, nowMs);
+    // Not awaited: the sweep is maintenance and never delays the registration.
+    sweepOwn(artifactDirectory, retentionMs, nowMs);
     return { ...meta, reportResource: reportResource(artifactDirectory, artifactId) };
 };
 /**
@@ -173,13 +177,15 @@ export const registerFeedbackArtifact = async (artifact, options = {}) => {
 // Parse boundary: the request's fields are checked here.
 export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
     const { platform = process.platform, retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS, now = Date.now } = options;
-    const artifactId = assertArtifactId(request);
+    assertArtifactRequest(request);
+    const { artifactId } = request;
     assertPositiveInteger(request.expectedSize, 'expected size');
     if (typeof request.expectedSha256 !== 'string' || !SHA256_PATTERN.test(request.expectedSha256))
         throw new RangeError('Feedback expected SHA-256 is invalid');
     assertPositiveInteger(retentionMs, 'artifact retention');
     const nowMs = assertClock(clock(now)());
-    const artifactDirectory = options.artifactDirectory ?? requireStorageTarget(options.storageTarget ?? currentStorageLayout().feedbackArtifacts, 'feedbackArtifacts');
+    const artifactDirectory = options.artifactDirectory ??
+        requireStorageTarget(options.storageTarget ?? currentStorageLayout().feedbackArtifacts, 'feedbackArtifacts');
     const directory = join(artifactDirectory, artifactDirectoryName(artifactId));
     try {
         await tightenExistingPrivateDirectory(directory, platform);
@@ -211,7 +217,10 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
         throw new Error('Feedback archive is invalid');
     const bytes = await readFile(archivePath);
     const actualSha256 = sha256(bytes);
-    if (bytes.length !== meta.sizeBytes || bytes.length !== request.expectedSize || actualSha256 !== meta.sha256 || actualSha256 !== request.expectedSha256) {
+    if (bytes.length !== meta.sizeBytes ||
+        bytes.length !== request.expectedSize ||
+        actualSha256 !== meta.sha256 ||
+        actualSha256 !== request.expectedSha256) {
         throw storageError('Feedback archive integrity verification failed', 'artifact_integrity');
     }
     return { bytes, kind: meta.kind, sizeBytes: meta.sizeBytes, sha256: meta.sha256, transcriptIncluded: meta.transcriptIncluded };
@@ -219,18 +228,17 @@ export const loadVerifiedFeedbackArtifact = async (request, options = {}) => {
 /**
  * Removes one definitively uploaded artifact. A removal that fails leaves the directory to the ordinary
  * age sweep and never changes the public upload receipt.
- * @param {{ artifactId: string }} request
- * @param {{ artifactDirectory?: string, storageTarget?: { state: string, path?: string, reason?: string }, platform?: NodeJS.Platform, retentionMs?: number, now?: number | (() => number) }} options
  */
 // Parse boundary: the request names the artifact, checked here.
 export const retireFeedbackArtifact = async (request, options = {}) => {
     const { platform = process.platform, retentionMs = FEEDBACK_ARTIFACT_RETENTION_MS, now = Date.now } = options;
-    const artifactId = assertArtifactId(request);
+    assertArtifactRequest(request);
+    const { artifactId } = request;
     const storageTarget = options.storageTarget ?? currentStorageLayout().feedbackArtifacts;
     if (options.artifactDirectory === undefined && storageTarget.state !== 'ready')
         return { retired: false, localCleanup: 'complete' };
     // A ready target has a path: an unready one returned above.
-    const artifactDirectory = (options.artifactDirectory ?? storageTarget.path);
+    const artifactDirectory = options.artifactDirectory ?? requireStorageTarget(storageTarget, 'feedbackArtifacts');
     const nowMs = assertClock(clock(now)());
     const directory = join(artifactDirectory, artifactDirectoryName(artifactId));
     try {
@@ -247,6 +255,7 @@ export const retireFeedbackArtifact = async (request, options = {}) => {
     catch {
         return { retired: false, localCleanup: 'pending' };
     }
-    void sweepOwn(artifactDirectory, retentionMs, nowMs);
+    // Not awaited: the sweep is maintenance and never delays the receipt.
+    sweepOwn(artifactDirectory, retentionMs, nowMs);
     return { retired: true, localCleanup: 'complete' };
 };

@@ -28,7 +28,7 @@ export const assertUploadDestination = (uploadUrl, destinations = FEEDBACK_UPLOA
         throw destinationRefused();
     // S3 virtual-host addressing selects the bucket from Host, even when the connection URL is pinned.
     // A grant no hook signed must not replace that authority through its required headers.
-    if (Object.entries(requiredHeaders).some(([name, value]) => name.toLowerCase() === 'host' && value.toLowerCase() !== target.host)) {
+    if (Object.entries(requiredHeaders).some(([name, value]) => name.toLowerCase() === 'host' && (typeof value !== 'string' || value.toLowerCase() !== target.host))) {
         throw destinationRefused();
     }
     return target;
@@ -37,7 +37,7 @@ export const assertUploadDestination = (uploadUrl, destinations = FEEDBACK_UPLOA
 // route that accepts, stores, re-emits or publishes that key tests it here, so the value cannot pass one
 // boundary and fail another; the byte bound is at least as strict as the schema's code-unit maxLength.
 const REPORT_ID_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
-export const isPublishableObjectKey = (value) => typeof value === 'string'
-    && value.length > 0
-    && Buffer.byteLength(value, 'utf8') <= FEEDBACK_REPORT_ID_MAX_LENGTH
-    && !REPORT_ID_CONTROL_CHARACTERS.test(value);
+export const isPublishableObjectKey = (value) => typeof value === 'string' &&
+    value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= FEEDBACK_REPORT_ID_MAX_LENGTH &&
+    !REPORT_ID_CONTROL_CHARACTERS.test(value);

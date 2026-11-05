@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { createCorrelationBroker } from '../bridge/broker/correlation.mjs';
-import { AUTHORIZATION_RELEASE_TIMEOUT_MS, AUTHORIZATION_SCOPE_MAX_MS, MAX_ACTIVE_AUTHORIZATION_SCOPES, REQUEST_TIMEOUT_GRACE_MS } from '../bridge/limits.mjs';
-import { REQUEST_TIMEOUT_MS } from '../shared/timeouts.mjs';
+import { AUTHORIZATION_RELEASE_TIMEOUT_MS, AUTHORIZATION_SCOPE_MAX_MS, MAX_ACTIVE_AUTHORIZATION_SCOPES, REQUEST_TIMEOUT_GRACE_MS, } from '../bridge/limits.mjs';
 import { OZON_PACKAGE } from '../ozon-seller/out/extension/package.mjs';
 import { OZON_PROMOTION } from '../ozon-seller/out/extension/promotion.mjs';
-import { SELLER_OPERATION } from '../wb-seller/out/extension/operations.mjs';
-import { MESSAGE_TYPES, SELLER_SCOPE_DURATION_MS } from '../transport/extension/wire.mjs';
 import { ToolExecutionError } from '../shared/coded-error.mjs';
+import { REQUEST_TIMEOUT_MS } from '../shared/timeouts.mjs';
+import { MESSAGE_TYPES, SELLER_SCOPE_DURATION_MS } from '../transport/extension/wire.mjs';
+import { safeFeedbackProperty } from '../transport/failures/evidence.mjs';
+import { SELLER_OPERATION } from '../wb-seller/out/extension/operations.mjs';
 // The family half of the request broker: the WB fetch, the seller operations and the Ozon operations are wb-client's,
 // wb-seller's and ozon-seller's adapters (out/extension), each a caller of the correlation broker's `open` with a frame
 // handler (bridge/broker/correlation.mjs). The WB fetch and seller frames are routed here, the Ozon ones through the Ozon
@@ -16,7 +17,10 @@ const LONG_SCOPE_JOB_TYPES = ['seller_reviews', 'ozon_seller_promotion_reports',
 // The request types of the families; the session requests use the wire's message types.
 const WB_FETCH = MESSAGE_TYPES.wbFetch;
 // What each family's route receives besides the request id.
-const FAMILY_ROUTES = { [WB_FETCH]: 'routeWbFetch', [SELLER_OPERATION]: 'routeSellerOperation' };
+const FAMILY_ROUTES = {
+    [WB_FETCH]: 'routeWbFetch',
+    [SELLER_OPERATION]: 'routeSellerOperation',
+};
 export class RequestBroker {
     constructor({ routeWbFetch, routeSellerOperation, routeAuthorization, routeDiagnosticSnapshot = undefined, createRequestId = randomUUID, defaultTimeout = REQUEST_TIMEOUT_MS, authorizationReleaseTimeout = AUTHORIZATION_RELEASE_TIMEOUT_MS, authorizationScopeMaxMs = AUTHORIZATION_SCOPE_MAX_MS, sellerAuthorizationScopeMaxMs = SELLER_SCOPE_DURATION_MS, maxActiveAuthorizationScopes = MAX_ACTIVE_AUTHORIZATION_SCOPES, onUnsettled, }) {
         this.routeWbFetch = routeWbFetch;
@@ -76,14 +80,19 @@ export class RequestBroker {
     // Hands a request's frame to today's route: the session requests' routes, or the family's.
     #route({ id, type, payload }) {
         if (type === MESSAGE_TYPES.browserJobAuthorize)
-            return this.routeAuthorization({ requestId: id, token: payload.token });
+            return this.routeAuthorization({ requestId: id, token: 'token' in payload ? payload.token : undefined });
         // A diagnostic snapshot is requested only with its route.
-        if (type === MESSAGE_TYPES.diagnosticSnapshot)
+        if (type === MESSAGE_TYPES.diagnosticSnapshot) {
+            if (!this.routeDiagnosticSnapshot)
+                throw new TypeError('Diagnostic snapshot routing is unavailable.');
             return this.routeDiagnosticSnapshot({ requestId: id });
-        if (type === SELLER_OPERATION && typeof this.routeSellerOperation !== 'function')
-            throw new Error('Seller operation routing is unavailable.');
+        }
         // A family request has its route; a missing one throws as it always did.
-        return this[FAMILY_ROUTES[type]]({ requestId: id, ...payload });
+        const routeName = FAMILY_ROUTES[type];
+        const route = routeName === undefined ? undefined : this[routeName];
+        if (!route)
+            throw new TypeError(`No route for ${type} requests.`);
+        return route({ requestId: id, ...payload });
     }
     // A frame for the request `id` of `type`; a request that is gone, or of another type, reports the answer as late.
     #deliver(type, kind, id, detail, frame) {
@@ -113,8 +122,14 @@ export class RequestBroker {
         return this.correlation.has(requestId, OZON_PACKAGE);
     }
     rejectPendingRequests(message) {
-        this.correlation.rejectAll([WB_FETCH, MESSAGE_TYPES.diagnosticSnapshot, MESSAGE_TYPES.browserJobAuthorizationRelease, SELLER_OPERATION,
-            OZON_PROMOTION, OZON_PACKAGE], message);
+        this.correlation.rejectAll([
+            WB_FETCH,
+            MESSAGE_TYPES.diagnosticSnapshot,
+            MESSAGE_TYPES.browserJobAuthorizationRelease,
+            SELLER_OPERATION,
+            OZON_PROMOTION,
+            OZON_PACKAGE,
+        ], message);
     }
     rejectPendingAuthorizations(message) {
         this.correlation.rejectAll([MESSAGE_TYPES.browserJobAuthorize], message);
@@ -122,33 +137,51 @@ export class RequestBroker {
     }
     invalidateAuthorizationWork() {
         const error = this.correlation.reauthorizationRequired();
-        this.correlation.rejectAll([WB_FETCH, MESSAGE_TYPES.browserJobAuthorizationRelease, SELLER_OPERATION, OZON_PROMOTION, OZON_PACKAGE,
-            MESSAGE_TYPES.browserJobAuthorize], error);
+        this.correlation.rejectAll([
+            WB_FETCH,
+            MESSAGE_TYPES.browserJobAuthorizationRelease,
+            SELLER_OPERATION,
+            OZON_PROMOTION,
+            OZON_PACKAGE,
+            MESSAGE_TYPES.browserJobAuthorize,
+        ], error);
         this.correlation.releaseAllScopes(false);
     }
     resolveDiagnosticSnapshot(requestId, snapshot) {
-        return this.#deliver(MESSAGE_TYPES.diagnosticSnapshot, 'diagnostic-snapshot-result', requestId, undefined, { type: 'result', payload: snapshot });
+        return this.#deliver(MESSAGE_TYPES.diagnosticSnapshot, 'diagnostic-snapshot-result', requestId, undefined, {
+            type: 'result',
+            payload: snapshot,
+        });
     }
     rejectDiagnosticSnapshot(requestId, error) {
-        return this.#deliver(MESSAGE_TYPES.diagnosticSnapshot, 'diagnostic-snapshot-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(MESSAGE_TYPES.diagnosticSnapshot, 'diagnostic-snapshot-error', requestId, safeFeedbackProperty(error, 'code'), { type: 'error', payload: error });
     }
     requestDiagnosticSnapshot(timeout = this.defaultTimeout) {
-        if (typeof this.routeDiagnosticSnapshot !== 'function') {
+        if (this.routeDiagnosticSnapshot === undefined) {
             return Promise.reject(new ToolExecutionError('UNSUPPORTED_CAPABILITY', 'Extension diagnostics are unavailable.', 'extension', false));
         }
         return this.correlation.requestDiagnosticSnapshot(timeout);
     }
     resolveAuthorization(requestId, authorization) {
-        return this.#deliver(MESSAGE_TYPES.browserJobAuthorize, 'authorization-result', requestId, undefined, { type: 'result', payload: authorization });
+        return this.#deliver(MESSAGE_TYPES.browserJobAuthorize, 'authorization-result', requestId, undefined, {
+            type: 'result',
+            payload: authorization,
+        });
     }
     rejectAuthorization(requestId, error) {
-        return this.#deliver(MESSAGE_TYPES.browserJobAuthorize, 'authorization-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(MESSAGE_TYPES.browserJobAuthorize, 'authorization-error', requestId, safeFeedbackProperty(error, 'code'), {
+            type: 'error',
+            payload: error,
+        });
     }
     resolveAuthorizationRelease(requestId) {
-        return this.#deliver(MESSAGE_TYPES.browserJobAuthorizationRelease, 'authorization-release-result', requestId, undefined, { type: 'result', payload: true });
+        return this.#deliver(MESSAGE_TYPES.browserJobAuthorizationRelease, 'authorization-release-result', requestId, undefined, {
+            type: 'result',
+            payload: true,
+        });
     }
     rejectAuthorizationRelease(requestId, error) {
-        return this.#deliver(MESSAGE_TYPES.browserJobAuthorizationRelease, 'authorization-release-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(MESSAGE_TYPES.browserJobAuthorizationRelease, 'authorization-release-error', requestId, safeFeedbackProperty(error, 'code'), { type: 'error', payload: error });
     }
     // The job's lease: the correlation broker's binding (its id, scope, attested job type, signed job and expiry), the grant,
     // whether the scope is still active, its release.
@@ -167,17 +200,24 @@ export class RequestBroker {
     requestAuthorizationRelease(authorizationId, route, timeout = this.authorizationReleaseTimeout) {
         return this.correlation.releaseAuthorization(authorizationId, route, timeout);
     }
+    // A response that is no object carries no fields beside the request id.
     resolveFetch(requestId, response, { includeRequestId = false } = {}) {
-        return this.#deliver(WB_FETCH, 'fetch-result', requestId, response?.code, { type: 'result', payload: includeRequestId ? { ...response, requestId } : response });
+        return this.#deliver(WB_FETCH, 'fetch-result', requestId, safeFeedbackProperty(response, 'code'), {
+            type: 'result',
+            payload: includeRequestId ? { ...(typeof response === 'object' ? response : {}), requestId } : response,
+        });
     }
     rejectFetch(requestId, error) {
-        return this.#deliver(WB_FETCH, 'fetch-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(WB_FETCH, 'fetch-error', requestId, safeFeedbackProperty(error, 'code'), { type: 'error', payload: error });
     }
     resolveSellerOperation(requestId, response) {
         return this.#deliver(SELLER_OPERATION, 'seller-result', requestId, undefined, { type: 'result', payload: response });
     }
     rejectSellerOperation(requestId, error) {
-        return this.#deliver(SELLER_OPERATION, 'seller-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(SELLER_OPERATION, 'seller-error', requestId, safeFeedbackProperty(error, 'code'), {
+            type: 'error',
+            payload: error,
+        });
     }
     async startSellerStream(requestId, metadata) {
         return this.#deliver(SELLER_OPERATION, 'seller-stream-start', requestId, undefined, { type: 'stream_start', payload: metadata });
@@ -192,33 +232,57 @@ export class RequestBroker {
         return this.#deliver(OZON_PROMOTION, 'ozon-result', requestId, undefined, { type: 'result', payload: result });
     }
     rejectOzonPromotionReport(requestId, error) {
-        return this.#deliver(OZON_PROMOTION, 'ozon-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(OZON_PROMOTION, 'ozon-error', requestId, safeFeedbackProperty(error, 'code'), {
+            type: 'error',
+            payload: error,
+        });
     }
     async startOzonPromotionStream(requestId, metadata) {
         return this.#deliver(OZON_PROMOTION, 'ozon-stream-start', requestId, undefined, { type: 'stream_start', payload: metadata });
     }
     async appendOzonPromotionStreamChunk(requestId, chunk) {
-        return this.#deliver(OZON_PROMOTION, 'ozon-stream-chunk', requestId, chunk?.index, { type: 'stream_chunk', payload: chunk });
+        return this.#deliver(OZON_PROMOTION, 'ozon-stream-chunk', requestId, safeFeedbackProperty(chunk, 'index'), {
+            type: 'stream_chunk',
+            payload: chunk,
+        });
     }
     async endOzonPromotionStream(requestId, metadata) {
         return this.#deliver(OZON_PROMOTION, 'ozon-stream-end', requestId, undefined, { type: 'stream_end', payload: metadata });
     }
     async recordOzonReportPackagePhase(requestId, family, payload) {
-        return this.#deliver(OZON_PACKAGE, 'ozon-package-phase', requestId, payload?.itemIndex, { type: 'phase', payload: { family, value: payload } });
+        return this.#deliver(OZON_PACKAGE, 'ozon-package-phase', requestId, safeFeedbackProperty(payload, 'itemIndex'), {
+            type: 'phase',
+            payload: { family, value: payload },
+        });
     }
     async startOzonReportPackageStream(requestId, family, metadata) {
-        return this.#deliver(OZON_PACKAGE, 'ozon-package-stream-start', requestId, metadata?.itemIndex, { type: 'stream_start', payload: { family, value: metadata } });
+        return this.#deliver(OZON_PACKAGE, 'ozon-package-stream-start', requestId, safeFeedbackProperty(metadata, 'itemIndex'), {
+            type: 'stream_start',
+            payload: { family, value: metadata },
+        });
     }
     async appendOzonReportPackageStreamChunk(requestId, family, chunk) {
-        return this.#deliver(OZON_PACKAGE, 'ozon-package-stream-chunk', requestId, chunk?.itemIndex, { type: 'stream_chunk', payload: { family, value: chunk } });
+        return this.#deliver(OZON_PACKAGE, 'ozon-package-stream-chunk', requestId, safeFeedbackProperty(chunk, 'itemIndex'), {
+            type: 'stream_chunk',
+            payload: { family, value: chunk },
+        });
     }
     async endOzonReportPackageStream(requestId, family, metadata) {
-        return this.#deliver(OZON_PACKAGE, 'ozon-package-stream-end', requestId, metadata?.itemIndex, { type: 'stream_end', payload: { family, value: metadata } });
+        return this.#deliver(OZON_PACKAGE, 'ozon-package-stream-end', requestId, safeFeedbackProperty(metadata, 'itemIndex'), {
+            type: 'stream_end',
+            payload: { family, value: metadata },
+        });
     }
     async resolveOzonReportPackageItem(requestId, family, itemIndex, result) {
-        return this.#deliver(OZON_PACKAGE, 'ozon-package-item-result', requestId, itemIndex, { type: 'item_result', payload: { family, itemIndex, value: result } });
+        return this.#deliver(OZON_PACKAGE, 'ozon-package-item-result', requestId, itemIndex, {
+            type: 'item_result',
+            payload: { family, itemIndex, value: result },
+        });
     }
     rejectOzonReportPackage(requestId, error) {
-        return this.#deliver(OZON_PACKAGE, 'ozon-package-error', requestId, error?.code, { type: 'error', payload: error });
+        return this.#deliver(OZON_PACKAGE, 'ozon-package-error', requestId, safeFeedbackProperty(error, 'code'), {
+            type: 'error',
+            payload: error,
+        });
     }
 }
